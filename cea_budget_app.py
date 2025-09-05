@@ -359,7 +359,7 @@ with k5: st.metric("Total Students", f"{total_students:,}")
 with k6: st.metric("Total Budget Exposure", fmt_money(total_budget))
 
 # ------------------------------ Tables (Program x Status) ------------------------------
-st.subheader("Confirmed / Approved - Student Budget")
+st.subheader("Approved - Student Budget")
 if agg_confirmed.empty:
     st.write("No records for the current filters.")
 else:
@@ -415,7 +415,7 @@ st.subheader("Student Lists — Downloads")
 c1, c2, c3 = st.columns(3)
 with c1:
     if confirmed_students_export.empty:
-        st.button("Download Confirmed / Approved (CSV)", disabled=True)
+        st.button("Download Confirmed /Approved (CSV)", disabled=True)
     else:
         st.download_button(
             "Download Confirmed / Approved (CSV)",
