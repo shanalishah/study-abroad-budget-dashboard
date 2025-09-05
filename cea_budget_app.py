@@ -351,8 +351,8 @@ total_students = conf_students + pend_students
 total_budget = (0 if pd.isna(conf_budget) else conf_budget) + (0 if pd.isna(pend_budget) else pend_budget)
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
-with k1: st.metric("Confirmed Students", f"{conf_students:,}")
-with k2: st.metric("Confirmed Budget Exposure", fmt_money(conf_budget))
+with k1: st.metric("Approved Students", f"{conf_students:,}")
+with k2: st.metric("Approved Budget Exposure", fmt_money(conf_budget))
 with k3: st.metric("Pending Students", f"{pend_students:,}")
 with k4: st.metric("Pending Budget Exposure", fmt_money(pend_budget))
 with k5: st.metric("Total Students", f"{total_students:,}")
