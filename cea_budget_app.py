@@ -365,7 +365,7 @@ if agg_confirmed.empty:
 else:
     st.dataframe(agg_confirmed.sort_values(["Program","Status"]), use_container_width=True)
 
-st.subheader("Preliminary / Pending - Student Budget")
+st.subheader("Pending - Student Budget")
 if agg_pending.empty:
     st.write("No records for the current filters.")
 else:
