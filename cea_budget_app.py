@@ -17,11 +17,11 @@ st.set_page_config(page_title="Study Abroad Budget Dashboard", layout="wide")
 
 st.title("Study Abroad Budget Dashboard")
 st.markdown(
-    # "• Defaults to the latest timestamp-named applications file (e.g., `202594152731.txt`).\n"
-    # "• Uploading a file overrides the default **for this session**.\n"
-    # "• Program costs are loaded from **ProgramCost.(tsv|txt|csv|yaml|yml|json)** in the repo.\n"
-    # "• Budget counts **unique students** (one final app per student): "
-    # "**Committed** > **Granted** > **Provisional**; ties break to **highest program cost**."
+    "• Defaults to the latest timestamp-named applications file (e.g., `202594152731.txt`).\n"
+    "• Uploading a file overrides the default **for this session**.\n"
+    "• Program costs are loaded from **ProgramCost.(tsv|txt|csv|yaml|yml|json)** in the repo.\n"
+    "• Budget counts **unique students** (one final app per student): "
+    "**Committed** > **Granted** > **Provisional**; ties break to **highest program cost**."
 )
 
 # ------------------------------------------------------------
