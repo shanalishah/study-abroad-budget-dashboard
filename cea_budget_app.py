@@ -15,7 +15,6 @@ except Exception:
 
 # For Word/PDF reports
 from docx import Document
-from docx.shared import Inches
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.units import inch
@@ -241,19 +240,36 @@ def dedup_students_by_priority_then_cost(df_apps: pd.DataFrame, df_costs: pd.Dat
     tmp = tmp.drop_duplicates(subset="__StudentKey", keep="first")
     return tmp.drop(columns=["__StudentKey", "__Rank", "__Program_cost_key", "__CostValue"], errors="ignore")
 
+# ------------------------------ Aggregation (clean columns) ------------------------------
 def aggregate_by_program_status(df, costs, group_label):
+    """
+    Returns columns:
+      Program | Status | Student Count | Cost per Student (USD) | Budget (USD) | Cohort
+    """
     if df.empty:
-        return pd.DataFrame(columns=["__Program","__Status","Students","__Cost","Program Cost/Student (USD)","Budget","__Group"])
-    counts = df.groupby(["__Program","__Status"], dropna=False).size().reset_index(name="Students")
-    merged = counts.merge(costs, on="__Program", how="left")
-    merged["Program Cost/Student (USD)"] = merged["__Cost"]
-    merged["Budget"] = merged["Students"] * merged["__Cost"]
-    merged["__Group"] = group_label
-    return merged
+        return pd.DataFrame(columns=[
+            "Program","Status","Student Count","Cost per Student (USD)","Budget (USD)","Cohort"
+        ])
+
+    counts = (
+        df.groupby(["__Program","__Status"], dropna=False)
+          .size().reset_index(name="Student Count")
+    )
+    merged = counts.merge(costs, left_on="__Program", right_on="__Program", how="left")
+
+    merged["Program"] = merged["__Program"]
+    merged["Status"]  = merged["__Status"]
+
+    merged["Cost per Student (USD)"] = merged["__Cost"]
+    merged["Budget (USD)"] = merged["Student Count"] * merged["__Cost"]
+
+    merged["Cohort"] = group_label
+
+    return merged[["Program","Status","Student Count","Cost per Student (USD)","Budget (USD)","Cohort"]]
 
 def kpi_row(df):
-    total_students = int(df["Students"].sum()) if not df.empty else 0
-    total_budget = df["Budget"].sum(min_count=1) if "Budget" in df else pd.NA
+    total_students = int(df["Student Count"].sum()) if not df.empty else 0
+    total_budget = df["Budget (USD)"].sum(min_count=1) if not df.empty else pd.NA
     return total_students, total_budget
 
 def fmt_money(x):
@@ -297,8 +313,8 @@ if missing:
 # Normalize fields
 apps_df["__Program"] = apps_df[resolved["Program_Name"]].map(coalesce_program_keys)
 apps_df["__Status"]  = apps_df[resolved["Application_Status"]].fillna("")
-apps_df["__Term"]    = apps_df[resolved["Program_Term"]] if "Program_Term" in resolved else ""
-apps_df["__Year"]    = apps_df[resolved["Program_Year"]] if "Program_Year" in resolved else ""
+apps_df["__Term"]    = apps_df[resolved.get("Program_Term","")] if "Program_Term" in resolved else ""
+apps_df["__Year"]    = apps_df[resolved.get("Program_Year","")] if "Program_Year" in resolved else ""
 
 # ------------------------------ Filters ------------------------------
 st.sidebar.header("Filters")
@@ -347,17 +363,15 @@ st.subheader("Confirmed / Approved - Student Budget")
 if agg_confirmed.empty:
     st.write("No records for the current filters.")
 else:
-    tbl_c = agg_confirmed.rename(columns={"__Program":"Program","__Status":"Status","Students":"Student Count"})
-    st.dataframe(tbl_c.sort_values(["Program","Status"]), use_container_width=True)
+    st.dataframe(agg_confirmed.sort_values(["Program","Status"]), use_container_width=True)
 
 st.subheader("Preliminary / Pending - Student Budget")
 if agg_pending.empty:
     st.write("No records for the current filters.")
 else:
-    tbl_p = agg_pending.rename(columns={"__Program":"Program","__Status":"Status","Students":"Student Count"})
-    st.dataframe(tbl_p.sort_values(["Program","Status"]), use_container_width=True)
+    st.dataframe(agg_pending.sort_values(["Program","Status"]), use_container_width=True)
 
-# ------------------------------ Student lists & downloads ------------------------------
+# ------------------------------ Student lists (combined shown first) ------------------------------
 # Build student-level lists for each cohort (downloadable)
 student_cols_preferred = []
 for label in ["UR ID","UR_ID","Student_ID","Student Id","ID",
@@ -374,14 +388,12 @@ def build_student_export(df):
         return pd.DataFrame()
     cols = [c for c in student_cols_preferred if c in df.columns]
     export = df[cols].copy()
-    # Professional header cleanup
     export.columns = [c.replace("_"," ").strip() for c in export.columns]
     return export
 
 confirmed_students_export = build_student_export(confirmed)
 pending_students_export   = build_student_export(pending)
 
-# Combined list (with explicit Cohort column)
 combined_students_export = pd.DataFrame()
 if not confirmed_students_export.empty:
     tmp = confirmed_students_export.copy()
@@ -392,7 +404,14 @@ if not pending_students_export.empty:
     tmp.insert(0, "Cohort", "Preliminary / Pending")
     combined_students_export = pd.concat([combined_students_export, tmp], ignore_index=True)
 
-st.subheader("Student Lists")
+st.subheader("All Students — Combined List")
+if combined_students_export.empty:
+    st.write("No student records for the current filters.")
+else:
+    st.dataframe(combined_students_export, use_container_width=True)
+
+# Downloads beneath the combined list
+st.subheader("Student Lists — Downloads")
 c1, c2, c3 = st.columns(3)
 with c1:
     if confirmed_students_export.empty:
@@ -425,19 +444,15 @@ with c3:
             mime="text/csv"
         )
 
-# Also show the combined list on-screen (as requested)
-st.subheader("All Students — Combined List")
-if combined_students_export.empty:
-    st.write("No student records for the current filters.")
-else:
-    st.dataframe(combined_students_export, use_container_width=True)
-
 # ------------------------------ Summary table ------------------------------
 def totals_by(df, label):
     if df.empty:
         return pd.DataFrame(columns=["Cohort","Status","Students","Budget"])
-    t = (df.groupby("__Status", dropna=False)[["Students","Budget"]]
-           .sum(min_count=1).reset_index().rename(columns={"__Status":"Status"}))
+    t = (
+        df.groupby("Status", dropna=False)[["Student Count","Budget (USD)"]]
+          .sum(min_count=1).reset_index()
+          .rename(columns={"Student Count":"Students","Budget (USD)":"Budget"})
+    )
     t.insert(0, "Cohort", label)
     return t
 
@@ -451,7 +466,7 @@ st.dataframe(summary, use_container_width=True)
 
 # ------------------------------ Diagnostics ------------------------------
 all_agg = pd.concat([agg_confirmed, agg_pending], ignore_index=True)
-missing_cost = sorted(all_agg[all_agg["Program Cost/Student (USD)"].isna()]["__Program"].dropna().unique().tolist())
+missing_cost = sorted(all_agg[all_agg["Cost per Student (USD)"].isna()]["Program"].dropna().unique().tolist())
 if missing_cost:
     with st.expander("Programs Missing Cost Mapping"):
         st.write(missing_cost)
@@ -537,15 +552,6 @@ def build_pdf_report() -> bytes:
     if summary.empty:
         c.drawString(1.0*inch, y, "No summary available for current filters.")
     else:
-        # for _, r in summary.iterrows():
-        #     s = f"{r['Cohort']} — {r['Status']}: Students {int(r['Students']):,}, Budget " + \
-        #         ("-" if pd.isna(r['Budget']) else f\"${r['Budget']:,.0f}\")
-        #     c.drawString(1.0*inch, y, s)
-        #     y -= 0.18*inch
-        #     if y < 1.0*inch:
-        #         c.showPage()
-        #         y = height - 1.0*inch
-        #         c.setFont("Helvetica", 10)
         for _, r in summary.iterrows():
             s = (
                 f"{r['Cohort']} — {r['Status']}: "
@@ -558,6 +564,7 @@ def build_pdf_report() -> bytes:
                 c.showPage()
                 y = height - 1.0*inch
                 c.setFont("Helvetica", 10)
+
     c.showPage()
     c.save()
     return bio.getvalue()
@@ -588,10 +595,10 @@ with colC:
     # Excel workbook with program breakdowns + summary
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        if 'tbl_c' in locals() and not tbl_c.empty:
-            tbl_c.to_excel(writer, index=False, sheet_name="Confirmed_Student_Budget")
-        if 'tbl_p' in locals() and not tbl_p.empty:
-            tbl_p.to_excel(writer, index=False, sheet_name="Pending_Student_Budget")
+        if not agg_confirmed.empty:
+            agg_confirmed.to_excel(writer, index=False, sheet_name="Confirmed_Student_Budget")
+        if not agg_pending.empty:
+            agg_pending.to_excel(writer, index=False, sheet_name="Pending_Student_Budget")
         if not summary.empty:
             summary.to_excel(writer, index=False, sheet_name="Budget_Summary_by_Status")
     st.download_button(
