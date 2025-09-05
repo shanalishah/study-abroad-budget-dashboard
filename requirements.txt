@@ -1,3 +1,6 @@
 streamlit>=1.36
 pandas>=2.2
 xlsxwriter>=3.2
+pyyaml>=6.0          # only if you may use YAML for costs
+python-docx>=1.1.0   # for Word report
+reportlab>=4.1       # for PDF snapshot
