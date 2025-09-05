@@ -1,11 +1,17 @@
 import io
 import re
 import glob
+import json
 import hashlib
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
 import streamlit as st
+
+try:
+    import yaml  # optional, only needed if you use YAML
+except Exception:
+    yaml = None
 
 st.set_page_config(page_title="Study Abroad Budget Dashboard", layout="wide")
 
@@ -13,64 +19,42 @@ st.title("Study Abroad Budget Dashboard")
 st.markdown(
     "• Defaults to the latest timestamp-named applications file (e.g., `202594152731.txt`).\n"
     "• Uploading a file overrides the default **for this session**.\n"
-    "• Program costs are loaded from **ProgramCost.xlsx** (auto-refresh on changes).\n"
+    "• Program costs are loaded from **ProgramCost.(tsv|txt|csv|yaml|yml|json)** in the repo.\n"
     "• Budget counts **unique students** (one final app per student): "
     "**Committed** > **Granted** > **Provisional**; ties break to **highest program cost**."
 )
 
-# ----------------- Repo file paths -----------------
-COST_FILE_PATH = Path("ProgramCost.xlsx")  # <- Excel format
-APPS_GLOB = "*.txt"                        # timestamp-named app exports in repo
+# ------------------------------------------------------------
+# Repo file discovery
+# ------------------------------------------------------------
+SUPPORTED_COST_EXTS = [".tsv", ".txt", ".csv", ".yaml", ".yml", ".json"]
 
-# ----------------- Helpers -----------------
-def read_any_table(file_or_path, default_sep="\t"):
-    """
-    Read tab-delimited first; fall back to CSV.
-    Works for file-like objects and Path/str. Trims whitespace.
-    """
-    if file_or_path is None:
+def find_cost_file() -> Path | None:
+    """Find a ProgramCost file with a supported extension, preferring TSV/TXT, then CSV, then YAML/JSON."""
+    candidates = []
+    for ext in SUPPORTED_COST_EXTS:
+        p = Path(f"ProgramCost{ext}")
+        if p.exists():
+            candidates.append(p)
+    # Prefer tab-delimited first for long names (commas inside program names)
+    preference = {".tsv": 0, ".txt": 0, ".csv": 1, ".yaml": 2, ".yml": 2, ".json": 3}
+    candidates.sort(key=lambda p: preference.get(p.suffix.lower(), 9))
+    return candidates[0] if candidates else None
+
+def find_latest_app_file() -> Path | None:
+    """Pick the newest applications file by numeric value of its timestamp stem (e.g., 202594152731.txt)."""
+    ts_re = re.compile(r"^(\d{4})(\d{1,2})(\d{1,2})(\d{6})$")
+    candidates = []
+    for f in glob.glob("*.txt"):
+        stem = Path(f).stem
+        if stem.isdigit() and ts_re.match(stem):
+            candidates.append(Path(f))
+    if not candidates:
         return None
-    try:
-        df = pd.read_csv(file_or_path, sep=default_sep, dtype=str, engine="python")
-    except Exception:
-        # reset pointer if file-like
-        if hasattr(file_or_path, "seek"):
-            try:
-                file_or_path.seek(0)
-            except Exception:
-                pass
-        df = pd.read_csv(file_or_path, sep=",", dtype=str, engine="python")
-    df.columns = [c.strip() for c in df.columns]
-    for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype(str).str.strip()
-    return df
-
-def normalize_currency(s):
-    if pd.isna(s):
-        return pd.NA
-    s = str(s).replace(",", "").replace("$", "").strip()
-    if s == "" or s.lower() == "na":
-        return pd.NA
-    try:
-        return float(s)
-    except Exception:
-        return pd.NA
-
-def coalesce_program_keys(name):
-    if pd.isna(name):
-        return None
-    s = str(name).strip()
-    s = re.sub("[\u2013\u2014]", "-", s)  # en/em dash -> hyphen
-    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-# Accepts 12–14 digit timestamps like 202594152731 (YYYY M D HHMMSS) or fully padded 20250904152731
-ts_re = re.compile(r"^(\d{4})(\d{1,2})(\d{1,2})(\d{6})$")
+    return max(candidates, key=lambda p: int(p.stem))
 
 def parse_timestamp_label(stem: str) -> str:
-    """Convert '202594152731' -> '2025-09-04 15:27:31'; fallback to stem if not parseable."""
+    ts_re = re.compile(r"^(\d{4})(\d{1,2})(\d{1,2})(\d{6})$")
     m = ts_re.match(stem)
     if not m:
         return stem
@@ -81,96 +65,40 @@ def parse_timestamp_label(stem: str) -> str:
     except ValueError:
         return stem
 
-def is_timestamp_stem(s: str) -> bool:
-    return bool(ts_re.match(s))
-
-def find_latest_app_file() -> Path | None:
-    """Pick the newest applications file by numeric value of its timestamp stem (e.g., 202594152731.txt)."""
-    candidates = []
-    for f in glob.glob(APPS_GLOB):
-        stem = Path(f).stem
-        if stem.isdigit() and is_timestamp_stem(stem):
-            candidates.append(Path(f))
-    if not candidates:
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+def read_any_table(file_or_path, default_sep="\t"):
+    """Read tab-delimited first; fall back to CSV. Works for file-like or Path/str. Trims whitespace."""
+    if file_or_path is None:
         return None
-    return max(candidates, key=lambda p: int(p.stem))
+    try:
+        df = pd.read_csv(file_or_path, sep=default_sep, dtype=str, engine="python")
+    except Exception:
+        if hasattr(file_or_path, "seek"):
+            try: file_or_path.seek(0)
+            except Exception: pass
+        df = pd.read_csv(file_or_path, sep=",", dtype=str, engine="python")
+    df.columns = [c.strip() for c in df.columns]
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].astype(str).str.strip()
+    return df
 
-# Status priority (higher is better)
-STATUS_PRIORITY = {
-    "Committed": 3,
-    "Permission to Study Abroad: Granted": 2,
-    "Provisional Permission": 1
-    # others -> 0
-}
-def status_rank(s): return STATUS_PRIORITY.get(s, 0)
+def normalize_currency(s):
+    if pd.isna(s): return pd.NA
+    s = str(s).replace(",", "").replace("$", "").strip()
+    if s == "" or s.lower() == "na": return pd.NA
+    try: return float(s)
+    except Exception: return pd.NA
 
-def build_student_key(df: pd.DataFrame) -> pd.Series:
-    """Choose the most reliable identifier available; fallback to name/email combo."""
-    candidates = [
-        "UR ID", "UR_ID", "Student_ID", "Student Id", "ID",
-        "Email", "Email_Address", "Email Address", "Student Email",
-        "NetID", "Net Id"
-    ]
-    found = next((c for c in candidates if c in df.columns), None)
-    if found:
-        return df[found].astype(str).str.strip().str.lower().replace({"nan": ""})
-    # Fallback: First/Last name combo
-    fn = df.columns[df.columns.str.lower().str.contains("first")].tolist()
-    ln = df.columns[df.columns.str.lower().str.contains("last")].tolist()
-    if fn and ln:
-        return (df[fn[0]].astype(str).str.strip().str.lower() + "||" +
-                df[ln[0]].astype(str).str.strip().str.lower())
-    # Final fallback: email + program
-    return (df.get("Email", pd.Series([""]*len(df))).astype(str).str.lower() + "||" +
-            df.get("__Program", pd.Series([""]*len(df))).astype(str).str.lower())
-
-def dedup_students_by_priority_then_cost(df_apps: pd.DataFrame, df_costs: pd.DataFrame) -> pd.DataFrame:
-    """
-    Keep exactly ONE row per student:
-      1) Highest status priority wins (Committed > Granted > Provisional > others)
-      2) If tie, choose the row with the highest program cost
-      3) If still tied, keep the first occurrence (stable)
-    """
-    if df_apps.empty:
-        return df_apps
-
-    costs = df_costs.rename(columns={"__Program": "__Program_cost_key", "__Cost": "__CostValue"}).copy()
-
-    tmp = df_apps.copy()
-    tmp["__StudentKey"] = build_student_key(tmp)
-    tmp["__Rank"] = tmp["__Status"].map(status_rank)
-
-    tmp = tmp.merge(
-        costs[["__Program_cost_key", "__CostValue"]],
-        left_on="__Program", right_on="__Program_cost_key", how="left"
-    )
-
-    tmp["__CostValue"] = tmp["__CostValue"].fillna(0.0)
-    tmp = tmp.sort_values(["__Rank", "__CostValue"], ascending=[False, False], kind="stable")
-    tmp = tmp.drop_duplicates(subset="__StudentKey", keep="first")
-    tmp = tmp.drop(columns=["__StudentKey", "__Rank", "__Program_cost_key", "__CostValue"], errors="ignore")
-    return tmp
-
-def aggregate_by_program_status(df, costs, group_label):
-    if df.empty:
-        return pd.DataFrame(columns=[
-            "__Program","__Status","Students","__Cost",
-            "Program Cost/Student (USD)","Budget","__Group"
-        ])
-    counts = df.groupby(["__Program","__Status"], dropna=False).size().reset_index(name="Students")
-    merged = counts.merge(costs, on="__Program", how="left")
-    merged["Program Cost/Student (USD)"] = merged["__Cost"]
-    merged["Budget"] = merged["Students"] * merged["__Cost"]
-    merged["__Group"] = group_label
-    return merged
-
-def kpi_row(df):
-    total_students = int(df["Students"].sum()) if not df.empty else 0
-    total_budget = df["Budget"].sum(min_count=1) if "Budget" in df else pd.NA
-    return total_students, total_budget
-
-def fmt_money(x):
-    return "-" if pd.isna(x) else f"${x:,.0f}"
+def coalesce_program_keys(name):
+    if pd.isna(name): return None
+    s = str(name).strip()
+    s = re.sub("[\u2013\u2014]", "-", s)  # en/em dash -> hyphen
+    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 def resolve_columns(df: pd.DataFrame):
     expected = {
@@ -189,67 +117,123 @@ def resolve_columns(df: pd.DataFrame):
     return resolved, missing
 
 def file_md5(path: Path) -> str:
-    """Hash a file's contents so cache invalidates when it changes."""
-    if not path.exists():
-        return ""
+    if not path or not path.exists(): return ""
     return hashlib.md5(path.read_bytes()).hexdigest()
 
-# ----------------- Load ProgramCost.xlsx with caching -----------------
+# ------------------------------------------------------------
+# Load ProgramCost.* from repo (TSV/TXT/CSV/YAML/JSON) with caching
+# ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=0)
-def load_costs_from_xlsx(path: Path, content_hash: str, sheet_name: str | int | None = 0) -> pd.DataFrame:
+def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
     """
-    Reads ProgramCost.xlsx and returns a tidy DataFrame with columns: __Program, __Cost.
-    - Ignores category header rows (e.g., '3rd Party Programs', 'Exchange & Direct Enrollment')
-    - Accepts columns '#', 'Program Name', '$ Cost/Student'
-    - Strips currency symbols/commas
+    Returns tidy DataFrame with columns: __Program, __Cost.
+    Accepts:
+      - TSV/TXT: tab-delimited with headers (Program Name, $ Cost/Student)
+      - CSV: comma-delimited with headers
+      - YAML: list of {program, cost} or {Program Name, $ Cost/Student}
+      - JSON: array of objects with program & cost keys
     """
-    if not path.exists():
-        st.warning(f"Program cost file not found at `{path}`. Budgets will be blank.")
+    if not path or not path.exists():
+        st.warning("No ProgramCost file found. Expected one of: ProgramCost.tsv/.txt/.csv/.yaml/.yml/.json")
         return pd.DataFrame(columns=["__Program", "__Cost"])
 
-    # Read the first sheet by default; force text
-    df = pd.read_excel(path, sheet_name=sheet_name, dtype=str, engine="openpyxl")
+    ext = path.suffix.lower()
+
+    if ext in [".tsv", ".txt"]:
+        df = pd.read_csv(path, sep="\t", dtype=str, engine="python")
+    elif ext == ".csv":
+        df = pd.read_csv(path, sep=",", dtype=str, engine="python")
+    elif ext in [".yaml", ".yml"]:
+        if yaml is None:
+            st.error("YAML support requires the 'pyyaml' package. Add it to requirements.txt or use CSV/TSV.")
+            return pd.DataFrame(columns=["__Program", "__Cost"])
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        df = pd.DataFrame(data)
+    elif ext == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        df = pd.DataFrame(data)
+    else:
+        st.error(f"Unsupported ProgramCost format: {ext}")
+        return pd.DataFrame(columns=["__Program", "__Cost"])
 
     # Normalize headers
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Try to locate core columns
-    col_num = next((c for c in ["#", "No", "Index"] if c in df.columns), None)
-    col_name = next((c for c in ["Program Name", "Program_Name", "Program", "Name"] if c in df.columns), None)
-    col_cost = next((c for c in ["$ Cost/Student", "Cost", "Cost per Student", "Cost_Student"] if c in df.columns), None)
+    # Try to locate name & cost fields
+    name_col = next((c for c in ["Program Name", "Program_Name", "program", "Program", "Name"] if c in df.columns), None)
+    cost_col = next((c for c in ["$ Cost/Student", "Cost", "cost", "Cost per Student", "Cost_Student"] if c in df.columns), None)
 
-    # If the file has no explicit headers but looks like 3 columns, rename them
-    if col_name is None and len(df.columns) >= 2:
-        # Heuristic: assume second column is Program Name, third is cost
-        # Keep robust to extra empty columns
-        possible = list(df.columns)
-        if len(possible) >= 3:
-            df = df.rename(columns={possible[0]: "#", possible[1]: "Program Name", possible[2]: "$ Cost/Student"})
-            col_name, col_cost = "Program Name", "$ Cost/Student"
-            col_num = "#"
-        elif len(possible) == 2:
-            df = df.rename(columns={possible[0]: "Program Name", possible[1]: "$ Cost/Student"})
-            col_name, col_cost = "Program Name", "$ Cost/Student"
-
-    if col_name is None or col_cost is None:
-        st.warning("Could not detect 'Program Name' and '$ Cost/Student' columns in ProgramCost.xlsx.")
+    if name_col is None or cost_col is None:
+        st.warning("ProgramCost file must include columns for Program Name and Cost (e.g., 'Program Name', '$ Cost/Student').")
         return pd.DataFrame(columns=["__Program", "__Cost"])
 
-    # Remove section/category header rows:
-    # They usually have a value in the first column and NaN in Program Name/Cost.
-    # Safer rule: keep only rows where Program Name is not empty.
-    df = df[~df[col_name].isna() & (df[col_name].astype(str).str.strip() != "")].copy()
-
-    # Clean program names and currency
-    df["__Program"] = df[col_name].map(coalesce_program_keys)
-    df["__Cost"] = df[col_cost].map(normalize_currency)
-
-    # Drop rows with no program name (after cleaning)
+    # Keep only rows with a program name
+    df = df[~df[name_col].isna() & (df[name_col].astype(str).str.strip() != "")].copy()
+    df["__Program"] = df[name_col].map(coalesce_program_keys)
+    df["__Cost"]    = df[cost_col].map(normalize_currency)
     df = df[~df["__Program"].isna() & (df["__Program"].astype(str).str.strip() != "")]
-    # Keep only needed columns
     return df[["__Program", "__Cost"]]
 
-# ----------------- Sidebar: actions & upload -----------------
+# ------------------------------------------------------------
+# Student dedup logic
+# ------------------------------------------------------------
+STATUS_PRIORITY = {"Committed": 3, "Permission to Study Abroad: Granted": 2, "Provisional Permission": 1}
+def status_rank(s): return STATUS_PRIORITY.get(s, 0)
+
+def build_student_key(df: pd.DataFrame) -> pd.Series:
+    candidates = [
+        "UR ID", "UR_ID", "Student_ID", "Student Id", "ID",
+        "Email", "Email_Address", "Email Address", "Student Email",
+        "NetID", "Net Id"
+    ]
+    found = next((c for c in candidates if c in df.columns), None)
+    if found:
+        return df[found].astype(str).str.strip().str.lower().replace({"nan": ""})
+    fn = df.columns[df.columns.str.lower().str.contains("first")].tolist()
+    ln = df.columns[df.columns.str.lower().str.contains("last")].tolist()
+    if fn and ln:
+        return (df[fn[0]].astype(str).str.strip().str.lower() + "||" +
+                df[ln[0]].astype(str).str.strip().str.lower())
+    return (df.get("Email", pd.Series([""]*len(df))).astype(str).str.lower() + "||" +
+            df.get("__Program", pd.Series([""]*len(df))).astype(str).str.lower())
+
+def dedup_students_by_priority_then_cost(df_apps: pd.DataFrame, df_costs: pd.DataFrame) -> pd.DataFrame:
+    if df_apps.empty:
+        return df_apps
+    costs = df_costs.rename(columns={"__Program": "__Program_cost_key", "__Cost": "__CostValue"}).copy()
+    tmp = df_apps.copy()
+    tmp["__StudentKey"] = build_student_key(tmp)
+    tmp["__Rank"] = tmp["__Status"].map(status_rank)
+    tmp = tmp.merge(
+        costs[["__Program_cost_key", "__CostValue"]],
+        left_on="__Program", right_on="__Program_cost_key", how="left"
+    )
+    tmp["__CostValue"] = tmp["__CostValue"].fillna(0.0)
+    tmp = tmp.sort_values(["__Rank", "__CostValue"], ascending=[False, False], kind="stable")
+    tmp = tmp.drop_duplicates(subset="__StudentKey", keep="first")
+    return tmp.drop(columns=["__StudentKey", "__Rank", "__Program_cost_key", "__CostValue"], errors="ignore")
+
+def aggregate_by_program_status(df, costs, group_label):
+    if df.empty:
+        return pd.DataFrame(columns=["__Program","__Status","Students","__Cost","Program Cost/Student (USD)","Budget","__Group"])
+    counts = df.groupby(["__Program","__Status"], dropna=False).size().reset_index(name="Students")
+    merged = counts.merge(costs, on="__Program", how="left")
+    merged["Program Cost/Student (USD)"] = merged["__Cost"]
+    merged["Budget"] = merged["Students"] * merged["__Cost"]
+    merged["__Group"] = group_label
+    return merged
+
+def kpi_row(df):
+    total_students = int(df["Students"].sum()) if not df.empty else 0
+    total_budget = df["Budget"].sum(min_count=1) if "Budget" in df else pd.NA
+    return total_students, total_budget
+
+def fmt_money(x):
+    return "-" if pd.isna(x) else f"${x:,.0f}"
+
+# ------------------------------------------------------------
+# Sidebar controls
+# ------------------------------------------------------------
 if st.sidebar.button("Refresh data from repository"):
     st.cache_data.clear()
     st.experimental_rerun()
@@ -258,33 +242,29 @@ st.sidebar.header("1) Applications Data")
 uploaded_apps = st.sidebar.file_uploader("(Optional) Upload applications export", type=["txt","tsv","csv"])
 
 if "use_repo_default" not in st.session_state:
-    st.session_state.use_repo_default = True  # default to repo
+    st.session_state.use_repo_default = True
 
-# If a new file is uploaded, use it for this session
 if uploaded_apps is not None:
     st.session_state.use_repo_default = False
 
-# Allow reverting to repository default (latest timestamp)
 if st.sidebar.button("Use latest repository file"):
     st.session_state.use_repo_default = True
 
-# Determine default repo file (latest timestamp)
 DEFAULT_APPS_PATH = find_latest_app_file()
-
-# Display current data source
 if st.session_state.use_repo_default:
     if DEFAULT_APPS_PATH:
-        label = parse_timestamp_label(DEFAULT_APPS_PATH.stem)
-        st.sidebar.success(f"Using default: {DEFAULT_APPS_PATH.name} ({label})")
+        st.sidebar.success(f"Using default: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
     else:
         st.sidebar.warning("No timestamp-named applications file found (e.g., 202594152731.txt).")
 else:
     st.sidebar.info("Using uploaded file (this session only)")
 
-# ----------------- Load costs (hash-keyed cache so edits to Excel bust cache) -----------------
-COSTS = load_costs_from_xlsx(COST_FILE_PATH, file_md5(COST_FILE_PATH), sheet_name=0)
+# ------------------------------------------------------------
+# Load costs & applications
+# ------------------------------------------------------------
+COST_FILE_PATH = find_cost_file()
+COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
 
-# ----------------- Load applications -----------------
 apps_df = read_any_table(DEFAULT_APPS_PATH, default_sep="\t") if st.session_state.use_repo_default else read_any_table(uploaded_apps, default_sep="\t")
 if apps_df is None or apps_df.empty:
     st.stop()
@@ -300,7 +280,7 @@ apps_df["__Status"]  = apps_df[resolved["Application_Status"]].fillna("")
 apps_df["__Term"]    = apps_df[resolved["Program_Term"]] if "Program_Term" in resolved else ""
 apps_df["__Year"]    = apps_df[resolved["Program_Year"]] if "Program_Year" in resolved else ""
 
-# ----------------- Filters -----------------
+# Filters
 st.sidebar.header("2) Filters (optional)")
 term_opts = ["(all)"] + sorted([t for t in apps_df["__Term"].dropna().unique() if str(t).strip()])
 year_opts = ["(all)"] + sorted([y for y in apps_df["__Year"].dropna().unique() if str(y).strip()])
@@ -313,18 +293,17 @@ if term != "(all)":
 if year != "(all)":
     filtered = filtered[filtered["__Year"] == year]
 
-# ----------------- UNIQUE-STUDENT DEDUP -----------------
-# One row per student: highest status priority, then highest cost
+# Unique-student dedup
 filtered = dedup_students_by_priority_then_cost(filtered, COSTS)
 
-# ----------------- Cohorts (after dedup) -----------------
+# Cohorts
 CONFIRMED_STATUSES = ["Committed", "Permission to Study Abroad: Granted", "Provisional Permission"]
 confirmed = filtered[filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
 pending   = filtered[~filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
 confirmed["__Group"] = "Confirmed / Approved"
 pending["__Group"]   = "Preliminary / Pending"
 
-# ----------------- Aggregation & KPIs -----------------
+# Aggregation & KPIs
 agg_confirmed = aggregate_by_program_status(confirmed, COSTS, "Confirmed / Approved")
 agg_pending   = aggregate_by_program_status(pending,   COSTS, "Preliminary / Pending")
 
@@ -337,50 +316,46 @@ with k2: st.metric("Confirmed Budget Exposure", fmt_money(conf_budget))
 with k3: st.metric("Pending Student Count", f"{pend_students:,}")
 with k4: st.metric("Pending Budget Exposure", fmt_money(pend_budget))
 
-# ----------------- Tables -----------------
+# Tables
 st.subheader("Confirmed / Approved Students (Committed, Granted, Provisional)")
 if agg_confirmed.empty:
     st.write("No rows in this category for current filters.")
 else:
-    tbl_c = agg_confirmed.rename(columns={"__Program": "Program", "__Status": "Status", "Students": "Student Count"})
-    st.dataframe(tbl_c.sort_values(["Program", "Status"]), use_container_width=True)
+    tbl_c = agg_confirmed.rename(columns={"__Program":"Program","__Status":"Status","Students":"Student Count"})
+    st.dataframe(tbl_c.sort_values(["Program","Status"]), use_container_width=True)
 
 st.subheader("Preliminary / Pending Students (All Other Statuses)")
 if agg_pending.empty:
     st.write("No rows in this category for current filters.")
 else:
-    tbl_p = agg_pending.rename(columns={"__Program": "Program", "__Status": "Status", "Students": "Student Count"})
-    st.dataframe(tbl_p.sort_values(["Program", "Status"]), use_container_width=True)
+    tbl_p = agg_pending.rename(columns={"__Program":"Program","__Status":"Status","Students":"Student Count"})
+    st.dataframe(tbl_p.sort_values(["Program","Status"]), use_container_width=True)
 
-# ----------------- Summary -----------------
+# Summary
 def totals_by(df, label):
     if df.empty:
-        return pd.DataFrame(columns=["Cohort", "Status", "Students", "Budget"])
-    t = (
-        df.groupby("__Status", dropna=False)[["Students", "Budget"]]
-          .sum(min_count=1)
-          .reset_index()
-          .rename(columns={"__Status": "Status"})
-    )
+        return pd.DataFrame(columns=["Cohort","Status","Students","Budget"])
+    t = (df.groupby("__Status", dropna=False)[["Students","Budget"]]
+           .sum(min_count=1).reset_index().rename(columns={"__Status":"Status"}))
     t.insert(0, "Cohort", label)
     return t
 
-summary = pd.concat(
-    [totals_by(agg_confirmed, "Confirmed / Approved"),
-     totals_by(agg_pending,   "Preliminary / Pending")],
-    ignore_index=True
-)
+summary = pd.concat([
+    totals_by(agg_confirmed, "Confirmed / Approved"),
+    totals_by(agg_pending,   "Preliminary / Pending"),
+], ignore_index=True)
+
 st.subheader("Budget Summary by Status Category")
 st.dataframe(summary, use_container_width=True)
 
-# ----------------- Diagnostics -----------------
+# Diagnostics
 all_agg = pd.concat([agg_confirmed, agg_pending], ignore_index=True)
 missing_cost = sorted(all_agg[all_agg["Program Cost/Student (USD)"].isna()]["__Program"].dropna().unique().tolist())
 if missing_cost:
     with st.expander("Programs missing cost mapping (click to review)"):
         st.write(missing_cost)
 
-# ----------------- Download workbook -----------------
+# Download workbook
 out = io.BytesIO()
 with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
     if not confirmed.empty: tbl_c.to_excel(writer, index=False, sheet_name="Confirmed_Program_Breakdown")
