@@ -11,15 +11,16 @@ st.set_page_config(page_title="Study Abroad Budget Dashboard", layout="wide")
 
 st.title("Study Abroad Budget Dashboard")
 st.markdown(
-    "• Defaults to the latest timestamp-named applications file in the repository (e.g., `202594152731.txt`).\n"
+    "• Defaults to the latest timestamp-named applications file (e.g., `202594152731.txt`).\n"
     "• Uploading a file overrides the default **for this session**.\n"
-    "• Program costs are loaded from **ProgramCost.txt** (auto-refresh on changes).\n"
-    "• Budgeting counts **unique students** (one final application per student): "
+    "• Program costs are loaded from **ProgramCost.xlsx** (auto-refresh on changes).\n"
+    "• Budget counts **unique students** (one final app per student): "
     "**Committed** > **Granted** > **Provisional**; ties break to **highest program cost**."
 )
 
 # ----------------- Repo file paths -----------------
-COST_FILE_PATH = Path("ProgramCost.txt")
+COST_FILE_PATH = Path("ProgramCost.xlsx")  # <- Excel format
+APPS_GLOB = "*.txt"                        # timestamp-named app exports in repo
 
 # ----------------- Helpers -----------------
 def read_any_table(file_or_path, default_sep="\t"):
@@ -86,7 +87,7 @@ def is_timestamp_stem(s: str) -> bool:
 def find_latest_app_file() -> Path | None:
     """Pick the newest applications file by numeric value of its timestamp stem (e.g., 202594152731.txt)."""
     candidates = []
-    for f in glob.glob("*.txt"):
+    for f in glob.glob(APPS_GLOB):
         stem = Path(f).stem
         if stem.isdigit() and is_timestamp_stem(stem):
             candidates.append(Path(f))
@@ -133,29 +134,20 @@ def dedup_students_by_priority_then_cost(df_apps: pd.DataFrame, df_costs: pd.Dat
     if df_apps.empty:
         return df_apps
 
-    # Map program -> cost
     costs = df_costs.rename(columns={"__Program": "__Program_cost_key", "__Cost": "__CostValue"}).copy()
 
     tmp = df_apps.copy()
     tmp["__StudentKey"] = build_student_key(tmp)
     tmp["__Rank"] = tmp["__Status"].map(status_rank)
 
-    # Join cost using normalized program name
     tmp = tmp.merge(
         costs[["__Program_cost_key", "__CostValue"]],
         left_on="__Program", right_on="__Program_cost_key", how="left"
     )
 
-    # Treat missing cost as 0 for comparison
     tmp["__CostValue"] = tmp["__CostValue"].fillna(0.0)
-
-    # Sort: higher rank first, higher cost first; stable to preserve original order for ties
     tmp = tmp.sort_values(["__Rank", "__CostValue"], ascending=[False, False], kind="stable")
-
-    # Drop duplicates per student, keeping best-ranked, highest-cost row
     tmp = tmp.drop_duplicates(subset="__StudentKey", keep="first")
-
-    # Clean up temp columns
     tmp = tmp.drop(columns=["__StudentKey", "__Rank", "__Program_cost_key", "__CostValue"], errors="ignore")
     return tmp
 
@@ -202,8 +194,62 @@ def file_md5(path: Path) -> str:
         return ""
     return hashlib.md5(path.read_bytes()).hexdigest()
 
+# ----------------- Load ProgramCost.xlsx with caching -----------------
+@st.cache_data(show_spinner=False, ttl=0)
+def load_costs_from_xlsx(path: Path, content_hash: str, sheet_name: str | int | None = 0) -> pd.DataFrame:
+    """
+    Reads ProgramCost.xlsx and returns a tidy DataFrame with columns: __Program, __Cost.
+    - Ignores category header rows (e.g., '3rd Party Programs', 'Exchange & Direct Enrollment')
+    - Accepts columns '#', 'Program Name', '$ Cost/Student'
+    - Strips currency symbols/commas
+    """
+    if not path.exists():
+        st.warning(f"Program cost file not found at `{path}`. Budgets will be blank.")
+        return pd.DataFrame(columns=["__Program", "__Cost"])
+
+    # Read the first sheet by default; force text
+    df = pd.read_excel(path, sheet_name=sheet_name, dtype=str, engine="openpyxl")
+
+    # Normalize headers
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Try to locate core columns
+    col_num = next((c for c in ["#", "No", "Index"] if c in df.columns), None)
+    col_name = next((c for c in ["Program Name", "Program_Name", "Program", "Name"] if c in df.columns), None)
+    col_cost = next((c for c in ["$ Cost/Student", "Cost", "Cost per Student", "Cost_Student"] if c in df.columns), None)
+
+    # If the file has no explicit headers but looks like 3 columns, rename them
+    if col_name is None and len(df.columns) >= 2:
+        # Heuristic: assume second column is Program Name, third is cost
+        # Keep robust to extra empty columns
+        possible = list(df.columns)
+        if len(possible) >= 3:
+            df = df.rename(columns={possible[0]: "#", possible[1]: "Program Name", possible[2]: "$ Cost/Student"})
+            col_name, col_cost = "Program Name", "$ Cost/Student"
+            col_num = "#"
+        elif len(possible) == 2:
+            df = df.rename(columns={possible[0]: "Program Name", possible[1]: "$ Cost/Student"})
+            col_name, col_cost = "Program Name", "$ Cost/Student"
+
+    if col_name is None or col_cost is None:
+        st.warning("Could not detect 'Program Name' and '$ Cost/Student' columns in ProgramCost.xlsx.")
+        return pd.DataFrame(columns=["__Program", "__Cost"])
+
+    # Remove section/category header rows:
+    # They usually have a value in the first column and NaN in Program Name/Cost.
+    # Safer rule: keep only rows where Program Name is not empty.
+    df = df[~df[col_name].isna() & (df[col_name].astype(str).str.strip() != "")].copy()
+
+    # Clean program names and currency
+    df["__Program"] = df[col_name].map(coalesce_program_keys)
+    df["__Cost"] = df[col_cost].map(normalize_currency)
+
+    # Drop rows with no program name (after cleaning)
+    df = df[~df["__Program"].isna() & (df["__Program"].astype(str).str.strip() != "")]
+    # Keep only needed columns
+    return df[["__Program", "__Cost"]]
+
 # ----------------- Sidebar: actions & upload -----------------
-# Manual refresh option for admins/colleagues
 if st.sidebar.button("Refresh data from repository"):
     st.cache_data.clear()
     st.experimental_rerun()
@@ -235,27 +281,8 @@ if st.session_state.use_repo_default:
 else:
     st.sidebar.info("Using uploaded file (this session only)")
 
-# ----------------- Load costs with cache keyed on file hash -----------------
-@st.cache_data(show_spinner=False, ttl=0)
-def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
-    """
-    Cached by content_hash so any change to ProgramCost.txt auto-invalidates.
-    ttl=0 => no time-based expiry; only hash or manual refresh changes.
-    """
-    if not path.exists():
-        st.warning(f"Program cost file not found at `{path}`. Budgets will be blank.")
-        return pd.DataFrame(columns=["__Program", "__Cost"])
-    costs_raw = read_any_table(path, default_sep="\t")
-    name_col  = next((c for c in ["Program Name", "Program_Name", "Program", "Name"] if c in costs_raw.columns), None)
-    value_col = next((c for c in ["$ Cost/Student", "Cost", "Cost per Student", "Cost_Student"] if c in costs_raw.columns), None)
-    if not name_col or not value_col:
-        st.warning("Could not detect Program/Cost columns in ProgramCost.txt.")
-        return pd.DataFrame(columns=["__Program", "__Cost"])
-    costs_raw["__Program"] = costs_raw[name_col].map(coalesce_program_keys)
-    costs_raw["__Cost"]    = costs_raw[value_col].map(normalize_currency)
-    return costs_raw[["__Program", "__Cost"]]
-
-COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
+# ----------------- Load costs (hash-keyed cache so edits to Excel bust cache) -----------------
+COSTS = load_costs_from_xlsx(COST_FILE_PATH, file_md5(COST_FILE_PATH), sheet_name=0)
 
 # ----------------- Load applications -----------------
 apps_df = read_any_table(DEFAULT_APPS_PATH, default_sep="\t") if st.session_state.use_repo_default else read_any_table(uploaded_apps, default_sep="\t")
@@ -305,13 +332,13 @@ conf_students, conf_budget = kpi_row(agg_confirmed)
 pend_students, pend_budget = kpi_row(agg_pending)
 
 k1, k2, k3, k4 = st.columns(4)
-with k1: st.metric("Approved Student Count", f"{conf_students:,}")
-with k2: st.metric("Approved Budget Exposure", fmt_money(conf_budget))
+with k1: st.metric("Confirmed Student Count", f"{conf_students:,}")
+with k2: st.metric("Confirmed Budget Exposure", fmt_money(conf_budget))
 with k3: st.metric("Pending Student Count", f"{pend_students:,}")
 with k4: st.metric("Pending Budget Exposure", fmt_money(pend_budget))
 
 # ----------------- Tables -----------------
-st.subheader("Approved Students (Committed, Granted, Provisional)")
+st.subheader("Confirmed / Approved Students (Committed, Granted, Provisional)")
 if agg_confirmed.empty:
     st.write("No rows in this category for current filters.")
 else:
@@ -355,7 +382,6 @@ if missing_cost:
 
 # ----------------- Download workbook -----------------
 out = io.BytesIO()
-# Prefer XlsxWriter; install via requirements.txt (xlsxwriter>=3.2)
 with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
     if not confirmed.empty: tbl_c.to_excel(writer, index=False, sheet_name="Confirmed_Program_Breakdown")
     if not pending.empty:   tbl_p.to_excel(writer, index=False, sheet_name="Pending_Program_Breakdown")
