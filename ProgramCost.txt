@@ -32,7 +32,7 @@ Exchange & Direct Enrollment
 4	Meiji Gakuin University	$0 
 5	Nanyang Technological University	$0 
 6	Seoul National University	$0 
-7	Sogang University "$3,940"
+7	Sogang University "$3,940 "
 8	University of Bristol	"$10,750 "
 9	University of Lausanne	$0 
 10	University of Leeds	$0 
@@ -40,3 +40,4 @@ Exchange & Direct Enrollment
 12	University of York	$0 
 
 13	Yonsei University	$0 
+
