@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 try:
-    import yaml  # optional, only needed if you use YAML
+    import yaml  # optional; only needed if you use YAML costs
 except Exception:
     yaml = None
 
@@ -25,18 +25,17 @@ st.markdown(
 )
 
 # ------------------------------------------------------------
-# Repo file discovery
+# File discovery
 # ------------------------------------------------------------
 SUPPORTED_COST_EXTS = [".tsv", ".txt", ".csv", ".yaml", ".yml", ".json"]
 
 def find_cost_file() -> Path | None:
-    """Find a ProgramCost file with a supported extension, preferring TSV/TXT, then CSV, then YAML/JSON."""
+    """Find ProgramCost file; prefer TSV/TXT, then CSV, then YAML/JSON."""
     candidates = []
     for ext in SUPPORTED_COST_EXTS:
         p = Path(f"ProgramCost{ext}")
         if p.exists():
             candidates.append(p)
-    # Prefer tab-delimited first for long names (commas inside program names)
     preference = {".tsv": 0, ".txt": 0, ".csv": 1, ".yaml": 2, ".yml": 2, ".json": 3}
     candidates.sort(key=lambda p: preference.get(p.suffix.lower(), 9))
     return candidates[0] if candidates else None
@@ -66,19 +65,60 @@ def parse_timestamp_label(stem: str) -> str:
         return stem
 
 # ------------------------------------------------------------
-# Helpers
+# Encoding-robust readers
 # ------------------------------------------------------------
+def _read_csv_forgiving(path_or_buf, sep, dtype=str):
+    """
+    Try encodings in order: utf-8, utf-8-sig (BOM), cp1252.
+    Replace undecodable bytes and skip truly broken lines.
+    """
+    encodings = ["utf-8", "utf-8-sig", "cp1252"]
+    last_err = None
+    for enc in encodings:
+        try:
+            return pd.read_csv(
+                path_or_buf,
+                sep=sep,
+                dtype=dtype,
+                engine="python",
+                encoding=enc,
+                encoding_errors="replace",
+                on_bad_lines="skip",
+            )
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+def _read_text(path: Path) -> str:
+    """Read text with forgiving encodings for YAML/JSON."""
+    for enc in ["utf-8", "utf-8-sig", "cp1252"]:
+        try:
+            return path.read_text(encoding=enc, errors="replace")
+        except Exception:
+            continue
+    return path.read_bytes().decode("utf-8", errors="replace")
+
 def read_any_table(file_or_path, default_sep="\t"):
-    """Read tab-delimited first; fall back to CSV. Works for file-like or Path/str. Trims whitespace."""
+    """
+    Read tab-delimited first; fall back to CSV.
+    Works for file-like or Path/str. Trims whitespace.
+    Uses forgiving encodings to avoid UnicodeDecodeError.
+    """
     if file_or_path is None:
         return None
+    # Try tab-delimited
     try:
-        df = pd.read_csv(file_or_path, sep=default_sep, dtype=str, engine="python")
+        df = _read_csv_forgiving(file_or_path, sep=default_sep, dtype=str)
     except Exception:
+        # Reset pointer if file-like
         if hasattr(file_or_path, "seek"):
-            try: file_or_path.seek(0)
-            except Exception: pass
-        df = pd.read_csv(file_or_path, sep=",", dtype=str, engine="python")
+            try:
+                file_or_path.seek(0)
+            except Exception:
+                pass
+        # Try comma-delimited
+        df = _read_csv_forgiving(file_or_path, sep=",", dtype=str)
+
     df.columns = [c.strip() for c in df.columns]
     for c in df.columns:
         if df[c].dtype == object:
@@ -121,7 +161,7 @@ def file_md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
 
 # ------------------------------------------------------------
-# Load ProgramCost.* from repo (TSV/TXT/CSV/YAML/JSON) with caching
+# Load ProgramCost.* (TSV/TXT/CSV/YAML/JSON) with caching
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=0)
 def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
@@ -140,17 +180,19 @@ def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
     ext = path.suffix.lower()
 
     if ext in [".tsv", ".txt"]:
-        df = pd.read_csv(path, sep="\t", dtype=str, engine="python")
+        df = _read_csv_forgiving(path, sep="\t", dtype=str)
     elif ext == ".csv":
-        df = pd.read_csv(path, sep=",", dtype=str, engine="python")
+        df = _read_csv_forgiving(path, sep=",", dtype=str)
     elif ext in [".yaml", ".yml"]:
         if yaml is None:
             st.error("YAML support requires the 'pyyaml' package. Add it to requirements.txt or use CSV/TSV.")
             return pd.DataFrame(columns=["__Program", "__Cost"])
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        txt = _read_text(path)
+        data = yaml.safe_load(txt) if txt else []
         df = pd.DataFrame(data)
     elif ext == ".json":
-        data = json.loads(path.read_text(encoding="utf-8"))
+        txt = _read_text(path)
+        data = json.loads(txt) if txt else []
         df = pd.DataFrame(data)
     else:
         st.error(f"Unsupported ProgramCost format: {ext}")
@@ -159,7 +201,7 @@ def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
     # Normalize headers
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Try to locate name & cost fields
+    # Identify name & cost columns
     name_col = next((c for c in ["Program Name", "Program_Name", "program", "Program", "Name"] if c in df.columns), None)
     cost_col = next((c for c in ["$ Cost/Student", "Cost", "cost", "Cost per Student", "Cost_Student"] if c in df.columns), None)
 
