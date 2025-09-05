@@ -305,13 +305,13 @@ conf_students, conf_budget = kpi_row(agg_confirmed)
 pend_students, pend_budget = kpi_row(agg_pending)
 
 k1, k2, k3, k4 = st.columns(4)
-with k1: st.metric("Confirmed Student Count", f"{conf_students:,}")
-with k2: st.metric("Confirmed Budget Exposure", fmt_money(conf_budget))
+with k1: st.metric("Approved Student Count", f"{conf_students:,}")
+with k2: st.metric("Approved Budget Exposure", fmt_money(conf_budget))
 with k3: st.metric("Pending Student Count", f"{pend_students:,}")
 with k4: st.metric("Pending Budget Exposure", fmt_money(pend_budget))
 
 # ----------------- Tables -----------------
-st.subheader("Confirmed / Approved Students (Committed, Granted, Provisional)")
+st.subheader("Approved Students (Committed, Granted, Provisional)")
 if agg_confirmed.empty:
     st.write("No rows in this category for current filters.")
 else:
