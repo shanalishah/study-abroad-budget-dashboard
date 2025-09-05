@@ -260,10 +260,6 @@ def fmt_money(x):
     return "-" if pd.isna(x) else f"${x:,.0f}"
 
 # ------------------------------ Sidebar controls ------------------------------
-if st.sidebar.button("Refresh from repository"):
-    st.cache_data.clear()
-    st.experimental_rerun()
-
 st.sidebar.header("Applications Data")
 uploaded_apps = st.sidebar.file_uploader("Upload export (optional)", type=["txt","tsv","csv"])
 
@@ -334,7 +330,7 @@ agg_pending   = aggregate_by_program_status(pending,   COSTS, "Preliminary / Pen
 conf_students, conf_budget = kpi_row(agg_confirmed)
 pend_students, pend_budget = kpi_row(agg_pending)
 
-# Since pending excludes confirmed, totals are the sum
+# Totals (pending excludes confirmed)
 total_students = conf_students + pend_students
 total_budget = (0 if pd.isna(conf_budget) else conf_budget) + (0 if pd.isna(pend_budget) else pend_budget)
 
@@ -347,14 +343,14 @@ with k5: st.metric("Total Students", f"{total_students:,}")
 with k6: st.metric("Total Budget Exposure", fmt_money(total_budget))
 
 # ------------------------------ Tables (Program x Status) ------------------------------
-st.subheader("Confirmed / Approved — Program Breakdown")
+st.subheader("Confirmed / Approved - Student Budget")
 if agg_confirmed.empty:
     st.write("No records for the current filters.")
 else:
     tbl_c = agg_confirmed.rename(columns={"__Program":"Program","__Status":"Status","Students":"Student Count"})
     st.dataframe(tbl_c.sort_values(["Program","Status"]), use_container_width=True)
 
-st.subheader("Preliminary / Pending — Program Breakdown")
+st.subheader("Preliminary / Pending - Student Budget")
 if agg_pending.empty:
     st.write("No records for the current filters.")
 else:
@@ -385,28 +381,56 @@ def build_student_export(df):
 confirmed_students_export = build_student_export(confirmed)
 pending_students_export   = build_student_export(pending)
 
-st.subheader("Downloadable Student Lists")
-c1, c2 = st.columns(2)
+# Combined list (with explicit Cohort column)
+combined_students_export = pd.DataFrame()
+if not confirmed_students_export.empty:
+    tmp = confirmed_students_export.copy()
+    tmp.insert(0, "Cohort", "Confirmed / Approved")
+    combined_students_export = pd.concat([combined_students_export, tmp], ignore_index=True)
+if not pending_students_export.empty:
+    tmp = pending_students_export.copy()
+    tmp.insert(0, "Cohort", "Preliminary / Pending")
+    combined_students_export = pd.concat([combined_students_export, tmp], ignore_index=True)
+
+st.subheader("Student Lists")
+c1, c2, c3 = st.columns(3)
 with c1:
     if confirmed_students_export.empty:
-        st.button("Download Confirmed/Approved (CSV)", disabled=True)
+        st.button("Download Confirmed / Approved (CSV)", disabled=True)
     else:
         st.download_button(
-            "Download Confirmed/Approved (CSV)",
+            "Download Confirmed / Approved (CSV)",
             data=confirmed_students_export.to_csv(index=False).encode("utf-8"),
             file_name="confirmed_approved_students.csv",
             mime="text/csv"
         )
 with c2:
     if pending_students_export.empty:
-        st.button("Download Preliminary/Pending (CSV)", disabled=True)
+        st.button("Download Preliminary / Pending (CSV)", disabled=True)
     else:
         st.download_button(
-            "Download Preliminary/Pending (CSV)",
+            "Download Preliminary / Pending (CSV)",
             data=pending_students_export.to_csv(index=False).encode("utf-8"),
             file_name="preliminary_pending_students.csv",
             mime="text/csv"
         )
+with c3:
+    if combined_students_export.empty:
+        st.button("Download Combined Student List (CSV)", disabled=True)
+    else:
+        st.download_button(
+            "Download Combined Student List (CSV)",
+            data=combined_students_export.to_csv(index=False).encode("utf-8"),
+            file_name="all_students_combined.csv",
+            mime="text/csv"
+        )
+
+# Also show the combined list on-screen (as requested)
+st.subheader("All Students — Combined List")
+if combined_students_export.empty:
+    st.write("No student records for the current filters.")
+else:
+    st.dataframe(combined_students_export, use_container_width=True)
 
 # ------------------------------ Summary table ------------------------------
 def totals_by(df, label):
@@ -442,20 +466,14 @@ def build_docx_report() -> bytes:
     doc.add_paragraph(f"Data source: {src_label}")
 
     doc.add_heading("Key Metrics", level=2)
-    p = doc.add_paragraph()
-    p.add_run(f"Confirmed Students: ").bold = True; doc.add_paragraph(f"{conf_students:,}")
-    p = doc.add_paragraph()
-    p.add_run(f"Confirmed Budget Exposure: ").bold = True; doc.add_paragraph(fmt_money(conf_budget))
-    p = doc.add_paragraph()
-    p.add_run(f"Pending Students: ").bold = True; doc.add_paragraph(f"{pend_students:,}")
-    p = doc.add_paragraph()
-    p.add_run(f"Pending Budget Exposure: ").bold = True; doc.add_paragraph(fmt_money(pend_budget))
-    p = doc.add_paragraph()
-    p.add_run(f"Total Students: ").bold = True; doc.add_paragraph(f"{total_students:,}")
-    p = doc.add_paragraph()
-    p.add_run(f"Total Budget Exposure: ").bold = True; doc.add_paragraph(fmt_money(total_budget))
+    doc.add_paragraph(f"Confirmed Students: {conf_students:,}")
+    doc.add_paragraph(f"Confirmed Budget Exposure: {fmt_money(conf_budget)}")
+    doc.add_paragraph(f"Pending Students: {pend_students:,}")
+    doc.add_paragraph(f"Pending Budget Exposure: {fmt_money(pend_budget)}")
+    doc.add_paragraph(f"Total Students: {total_students:,}")
+    doc.add_paragraph(f"Total Budget Exposure: {fmt_money(total_budget)}")
 
-    # Add summary table
+    # Summary table
     doc.add_heading("Budget Summary by Status", level=2)
     if not summary.empty:
         table = doc.add_table(rows=1, cols=4)
@@ -471,13 +489,11 @@ def build_docx_report() -> bytes:
     else:
         doc.add_paragraph("No summary available for current filters.")
 
-    # Save to bytes
     bio = io.BytesIO()
     doc.save(bio)
     return bio.getvalue()
 
 def build_pdf_report() -> bytes:
-    # Simple PDF snapshot (KPIs + summary lines)
     bio = io.BytesIO()
     c = canvas.Canvas(bio, pagesize=LETTER)
     width, height = LETTER
@@ -508,6 +524,10 @@ def build_pdf_report() -> bytes:
     ]
     for line in lines:
         c.drawString(1.0*inch, y, line); y -= 0.2*inch
+        if y < 1.0*inch:
+            c.showPage()
+            y = height - 1.0*inch
+            c.setFont("Helvetica", 10)
 
     y -= 0.2*inch
     c.setFont("Helvetica-Bold", 12)
@@ -519,7 +539,7 @@ def build_pdf_report() -> bytes:
     else:
         for _, r in summary.iterrows():
             s = f"{r['Cohort']} — {r['Status']}: Students {int(r['Students']):,}, Budget " + \
-                ("-" if pd.isna(r['Budget']) else f"${r['Budget']:,.0f}")
+                ("-" if pd.isna(r['Budget']) else f\"${r['Budget']:,.0f}\")
             c.drawString(1.0*inch, y, s)
             y -= 0.18*inch
             if y < 1.0*inch:
@@ -531,9 +551,8 @@ def build_pdf_report() -> bytes:
     c.save()
     return bio.getvalue()
 
-# ------------------------------ Downloads (Report & Workbook) ------------------------------
+# ------------------------------ Exports ------------------------------
 st.subheader("Exports")
-
 colA, colB, colC = st.columns(3)
 
 with colA:
@@ -558,10 +577,10 @@ with colC:
     # Excel workbook with program breakdowns + summary
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        if not agg_confirmed.empty:
-            tbl_c.to_excel(writer, index=False, sheet_name="Confirmed_Program_Breakdown")
-        if not agg_pending.empty:
-            tbl_p.to_excel(writer, index=False, sheet_name="Pending_Program_Breakdown")
+        if 'tbl_c' in locals() and not tbl_c.empty:
+            tbl_c.to_excel(writer, index=False, sheet_name="Confirmed_Student_Budget")
+        if 'tbl_p' in locals() and not tbl_p.empty:
+            tbl_p.to_excel(writer, index=False, sheet_name="Pending_Student_Budget")
         if not summary.empty:
             summary.to_excel(writer, index=False, sheet_name="Budget_Summary_by_Status")
     st.download_button(
