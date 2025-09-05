@@ -13,20 +13,19 @@ try:
 except Exception:
     yaml = None
 
-st.set_page_config(page_title="Study Abroad Budget Dashboard", layout="wide")
+# For Word/PDF reports
+from docx import Document
+from docx.shared import Inches
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.units import inch
 
-st.title("Study Abroad Budget Dashboard")
-st.markdown(
-    "• Defaults to the latest timestamp-named applications file (e.g., `202594152731.txt`).\n"
-    "• Uploading a file overrides the default **for this session**.\n"
-    "• Program costs are loaded from **ProgramCost.(tsv|txt|csv|yaml|yml|json)** in the repo.\n"
-    "• Budget counts **unique students** (one final app per student): "
-    "**Committed** > **Granted** > **Provisional**; ties break to **highest program cost**."
-)
+st.set_page_config(page_title="Education Abroad Budget Dashboard", layout="wide")
 
-# ------------------------------------------------------------
-# File discovery
-# ------------------------------------------------------------
+# ------------------------------ Title -------------------------------
+st.title("Education Abroad Budget Dashboard")
+
+# ------------------------------ File discovery ------------------------------
 SUPPORTED_COST_EXTS = [".tsv", ".txt", ".csv", ".yaml", ".yml", ".json"]
 
 def find_cost_file() -> Path | None:
@@ -64,9 +63,7 @@ def parse_timestamp_label(stem: str) -> str:
     except ValueError:
         return stem
 
-# ------------------------------------------------------------
-# Encoding-robust readers
-# ------------------------------------------------------------
+# ------------------------------ Encoding-robust readers ------------------------------
 def _read_csv_forgiving(path_or_buf, sep, dtype=str):
     """
     Try encodings in order: utf-8, utf-8-sig (BOM), cp1252.
@@ -160,21 +157,15 @@ def file_md5(path: Path) -> str:
     if not path or not path.exists(): return ""
     return hashlib.md5(path.read_bytes()).hexdigest()
 
-# ------------------------------------------------------------
-# Load ProgramCost.* (TSV/TXT/CSV/YAML/JSON) with caching
-# ------------------------------------------------------------
+# ------------------------------ Load ProgramCost.* (TSV/TXT/CSV/YAML/JSON) ------------------------------
 @st.cache_data(show_spinner=False, ttl=0)
 def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
     """
     Returns tidy DataFrame with columns: __Program, __Cost.
-    Accepts:
-      - TSV/TXT: tab-delimited with headers (Program Name, $ Cost/Student)
-      - CSV: comma-delimited with headers
-      - YAML: list of {program, cost} or {Program Name, $ Cost/Student}
-      - JSON: array of objects with program & cost keys
+    Accepts TSV/TXT/CSV/YAML/JSON.
     """
     if not path or not path.exists():
-        st.warning("No ProgramCost file found. Expected one of: ProgramCost.tsv/.txt/.csv/.yaml/.yml/.json")
+        st.warning("No cost file found. Expected one of: ProgramCost.tsv/.txt/.csv/.yaml/.yml/.json.")
         return pd.DataFrame(columns=["__Program", "__Cost"])
 
     ext = path.suffix.lower()
@@ -195,30 +186,25 @@ def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
         data = json.loads(txt) if txt else []
         df = pd.DataFrame(data)
     else:
-        st.error(f"Unsupported ProgramCost format: {ext}")
+        st.error(f"Unsupported cost format: {ext}")
         return pd.DataFrame(columns=["__Program", "__Cost"])
 
-    # Normalize headers
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Identify name & cost columns
     name_col = next((c for c in ["Program Name", "Program_Name", "program", "Program", "Name"] if c in df.columns), None)
     cost_col = next((c for c in ["$ Cost/Student", "Cost", "cost", "Cost per Student", "Cost_Student"] if c in df.columns), None)
 
     if name_col is None or cost_col is None:
-        st.warning("ProgramCost file must include columns for Program Name and Cost (e.g., 'Program Name', '$ Cost/Student').")
+        st.warning("Cost file must include columns for Program Name and Cost (e.g., 'Program Name', '$ Cost/Student').")
         return pd.DataFrame(columns=["__Program", "__Cost"])
 
-    # Keep only rows with a program name
     df = df[~df[name_col].isna() & (df[name_col].astype(str).str.strip() != "")].copy()
     df["__Program"] = df[name_col].map(coalesce_program_keys)
     df["__Cost"]    = df[cost_col].map(normalize_currency)
     df = df[~df["__Program"].isna() & (df["__Program"].astype(str).str.strip() != "")]
     return df[["__Program", "__Cost"]]
 
-# ------------------------------------------------------------
-# Student dedup logic
-# ------------------------------------------------------------
+# ------------------------------ Student selection logic ------------------------------
 STATUS_PRIORITY = {"Committed": 3, "Permission to Study Abroad: Granted": 2, "Provisional Permission": 1}
 def status_rank(s): return STATUS_PRIORITY.get(s, 0)
 
@@ -273,15 +259,13 @@ def kpi_row(df):
 def fmt_money(x):
     return "-" if pd.isna(x) else f"${x:,.0f}"
 
-# ------------------------------------------------------------
-# Sidebar controls
-# ------------------------------------------------------------
-if st.sidebar.button("Refresh data from repository"):
+# ------------------------------ Sidebar controls ------------------------------
+if st.sidebar.button("Refresh from repository"):
     st.cache_data.clear()
     st.experimental_rerun()
 
-st.sidebar.header("1) Applications Data")
-uploaded_apps = st.sidebar.file_uploader("(Optional) Upload applications export", type=["txt","tsv","csv"])
+st.sidebar.header("Applications Data")
+uploaded_apps = st.sidebar.file_uploader("Upload export (optional)", type=["txt","tsv","csv"])
 
 if "use_repo_default" not in st.session_state:
     st.session_state.use_repo_default = True
@@ -295,15 +279,13 @@ if st.sidebar.button("Use latest repository file"):
 DEFAULT_APPS_PATH = find_latest_app_file()
 if st.session_state.use_repo_default:
     if DEFAULT_APPS_PATH:
-        st.sidebar.success(f"Using default: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
+        st.sidebar.success(f"Source: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
     else:
-        st.sidebar.warning("No timestamp-named applications file found (e.g., 202594152731.txt).")
+        st.sidebar.warning("No timestamp-named applications file detected.")
 else:
-    st.sidebar.info("Using uploaded file (this session only)")
+    st.sidebar.info("Source: uploaded file (session only)")
 
-# ------------------------------------------------------------
-# Load costs & applications
-# ------------------------------------------------------------
+# ------------------------------ Load costs & applications ------------------------------
 COST_FILE_PATH = find_cost_file()
 COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
 
@@ -322,12 +304,12 @@ apps_df["__Status"]  = apps_df[resolved["Application_Status"]].fillna("")
 apps_df["__Term"]    = apps_df[resolved["Program_Term"]] if "Program_Term" in resolved else ""
 apps_df["__Year"]    = apps_df[resolved["Program_Year"]] if "Program_Year" in resolved else ""
 
-# Filters
-st.sidebar.header("2) Filters (optional)")
+# ------------------------------ Filters ------------------------------
+st.sidebar.header("Filters")
 term_opts = ["(all)"] + sorted([t for t in apps_df["__Term"].dropna().unique() if str(t).strip()])
 year_opts = ["(all)"] + sorted([y for y in apps_df["__Year"].dropna().unique() if str(y).strip()])
-term = st.sidebar.selectbox("Program Term", options=term_opts, index=0)
-year = st.sidebar.selectbox("Program Year", options=year_opts, index=0)
+term = st.sidebar.selectbox("Program term", options=term_opts, index=0)
+year = st.sidebar.selectbox("Program year", options=year_opts, index=0)
 
 filtered = apps_df.copy()
 if term != "(all)":
@@ -335,45 +317,98 @@ if term != "(all)":
 if year != "(all)":
     filtered = filtered[filtered["__Year"] == year]
 
-# Unique-student dedup
+# ------------------------------ Unique-student selection ------------------------------
 filtered = dedup_students_by_priority_then_cost(filtered, COSTS)
 
-# Cohorts
+# ------------------------------ Cohorts ------------------------------
 CONFIRMED_STATUSES = ["Committed", "Permission to Study Abroad: Granted", "Provisional Permission"]
 confirmed = filtered[filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
 pending   = filtered[~filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
 confirmed["__Group"] = "Confirmed / Approved"
 pending["__Group"]   = "Preliminary / Pending"
 
-# Aggregation & KPIs
+# ------------------------------ Aggregation & KPIs ------------------------------
 agg_confirmed = aggregate_by_program_status(confirmed, COSTS, "Confirmed / Approved")
 agg_pending   = aggregate_by_program_status(pending,   COSTS, "Preliminary / Pending")
 
 conf_students, conf_budget = kpi_row(agg_confirmed)
 pend_students, pend_budget = kpi_row(agg_pending)
 
-k1, k2, k3, k4 = st.columns(4)
-with k1: st.metric("Confirmed Student Count", f"{conf_students:,}")
-with k2: st.metric("Confirmed Budget Exposure", fmt_money(conf_budget))
-with k3: st.metric("Pending Student Count", f"{pend_students:,}")
-with k4: st.metric("Pending Budget Exposure", fmt_money(pend_budget))
+# Since pending excludes confirmed, totals are the sum
+total_students = conf_students + pend_students
+total_budget = (0 if pd.isna(conf_budget) else conf_budget) + (0 if pd.isna(pend_budget) else pend_budget)
 
-# Tables
-st.subheader("Confirmed / Approved Students (Committed, Granted, Provisional)")
+k1, k2, k3, k4, k5, k6 = st.columns(6)
+with k1: st.metric("Confirmed Students", f"{conf_students:,}")
+with k2: st.metric("Confirmed Budget Exposure", fmt_money(conf_budget))
+with k3: st.metric("Pending Students", f"{pend_students:,}")
+with k4: st.metric("Pending Budget Exposure", fmt_money(pend_budget))
+with k5: st.metric("Total Students", f"{total_students:,}")
+with k6: st.metric("Total Budget Exposure", fmt_money(total_budget))
+
+# ------------------------------ Tables (Program x Status) ------------------------------
+st.subheader("Confirmed / Approved — Program Breakdown")
 if agg_confirmed.empty:
-    st.write("No rows in this category for current filters.")
+    st.write("No records for the current filters.")
 else:
     tbl_c = agg_confirmed.rename(columns={"__Program":"Program","__Status":"Status","Students":"Student Count"})
     st.dataframe(tbl_c.sort_values(["Program","Status"]), use_container_width=True)
 
-st.subheader("Preliminary / Pending Students (All Other Statuses)")
+st.subheader("Preliminary / Pending — Program Breakdown")
 if agg_pending.empty:
-    st.write("No rows in this category for current filters.")
+    st.write("No records for the current filters.")
 else:
     tbl_p = agg_pending.rename(columns={"__Program":"Program","__Status":"Status","Students":"Student Count"})
     st.dataframe(tbl_p.sort_values(["Program","Status"]), use_container_width=True)
 
-# Summary
+# ------------------------------ Student lists & downloads ------------------------------
+# Build student-level lists for each cohort (downloadable)
+student_cols_preferred = []
+for label in ["UR ID","UR_ID","Student_ID","Student Id","ID",
+              "First Name","First_Name","First","Given Name",
+              "Last Name","Last_Name","Last","Family Name",
+              "Email","Email_Address","Email Address","Student Email",
+              resolved["Program_Name"], resolved["Application_Status"],
+              resolved.get("Program_Term", ""), resolved.get("Program_Year", "")]:
+    if label and label in apps_df.columns and label not in student_cols_preferred:
+        student_cols_preferred.append(label)
+
+def build_student_export(df):
+    if df.empty:
+        return pd.DataFrame()
+    cols = [c for c in student_cols_preferred if c in df.columns]
+    export = df[cols].copy()
+    # Professional header cleanup
+    export.columns = [c.replace("_"," ").strip() for c in export.columns]
+    return export
+
+confirmed_students_export = build_student_export(confirmed)
+pending_students_export   = build_student_export(pending)
+
+st.subheader("Downloadable Student Lists")
+c1, c2 = st.columns(2)
+with c1:
+    if confirmed_students_export.empty:
+        st.button("Download Confirmed/Approved (CSV)", disabled=True)
+    else:
+        st.download_button(
+            "Download Confirmed/Approved (CSV)",
+            data=confirmed_students_export.to_csv(index=False).encode("utf-8"),
+            file_name="confirmed_approved_students.csv",
+            mime="text/csv"
+        )
+with c2:
+    if pending_students_export.empty:
+        st.button("Download Preliminary/Pending (CSV)", disabled=True)
+    else:
+        st.download_button(
+            "Download Preliminary/Pending (CSV)",
+            data=pending_students_export.to_csv(index=False).encode("utf-8"),
+            file_name="preliminary_pending_students.csv",
+            mime="text/csv"
+        )
+
+# ------------------------------ Summary table ------------------------------
 def totals_by(df, label):
     if df.empty:
         return pd.DataFrame(columns=["Cohort","Status","Students","Budget"])
@@ -387,32 +422,151 @@ summary = pd.concat([
     totals_by(agg_pending,   "Preliminary / Pending"),
 ], ignore_index=True)
 
-st.subheader("Budget Summary by Status Category")
+st.subheader("Budget Summary by Status")
 st.dataframe(summary, use_container_width=True)
 
-# Diagnostics
+# ------------------------------ Diagnostics ------------------------------
 all_agg = pd.concat([agg_confirmed, agg_pending], ignore_index=True)
 missing_cost = sorted(all_agg[all_agg["Program Cost/Student (USD)"].isna()]["__Program"].dropna().unique().tolist())
 if missing_cost:
-    with st.expander("Programs missing cost mapping (click to review)"):
+    with st.expander("Programs Missing Cost Mapping"):
         st.write(missing_cost)
 
-# Download workbook
-out = io.BytesIO()
-with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-    if not confirmed.empty: tbl_c.to_excel(writer, index=False, sheet_name="Confirmed_Program_Breakdown")
-    if not pending.empty:   tbl_p.to_excel(writer, index=False, sheet_name="Pending_Program_Breakdown")
-    if not summary.empty:   summary.to_excel(writer, index=False, sheet_name="Budget_Summary_by_Status")
-    pd.DataFrame({"Note": [
-        "Unique-student budgeting: per student, the final application is chosen by status priority, then by highest program cost.",
-        "Status priority: Committed > Permission to Study Abroad: Granted > Provisional Permission > others.",
-        "Budget = Student Count × Program Cost/Student; Pending budget is potential exposure.",
-        "Programs without a cost mapping show Budget as NaN."
-    ]}).to_excel(writer, index=False, sheet_name="Notes")
+# ------------------------------ Report generation (DOCX & PDF) ------------------------------
+def build_docx_report() -> bytes:
+    doc = Document()
+    doc.add_heading("Education Abroad Budget Snapshot", level=1)
+    dt_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    src_label = DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH) else "Uploaded file"
+    doc.add_paragraph(f"Generated: {dt_label}")
+    doc.add_paragraph(f"Data source: {src_label}")
 
-st.download_button(
-    "Download Budget Workbook (.xlsx)",
-    data=out.getvalue(),
-    file_name="StudyAbroad_Budget_Dashboard.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+    doc.add_heading("Key Metrics", level=2)
+    p = doc.add_paragraph()
+    p.add_run(f"Confirmed Students: ").bold = True; doc.add_paragraph(f"{conf_students:,}")
+    p = doc.add_paragraph()
+    p.add_run(f"Confirmed Budget Exposure: ").bold = True; doc.add_paragraph(fmt_money(conf_budget))
+    p = doc.add_paragraph()
+    p.add_run(f"Pending Students: ").bold = True; doc.add_paragraph(f"{pend_students:,}")
+    p = doc.add_paragraph()
+    p.add_run(f"Pending Budget Exposure: ").bold = True; doc.add_paragraph(fmt_money(pend_budget))
+    p = doc.add_paragraph()
+    p.add_run(f"Total Students: ").bold = True; doc.add_paragraph(f"{total_students:,}")
+    p = doc.add_paragraph()
+    p.add_run(f"Total Budget Exposure: ").bold = True; doc.add_paragraph(fmt_money(total_budget))
+
+    # Add summary table
+    doc.add_heading("Budget Summary by Status", level=2)
+    if not summary.empty:
+        table = doc.add_table(rows=1, cols=4)
+        hdr = table.rows[0].cells
+        hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = "Cohort", "Status", "Students", "Budget"
+        for _, r in summary.iterrows():
+            row = table.add_row().cells
+            row[0].text = str(r["Cohort"])
+            row[1].text = str(r["Status"])
+            row[2].text = f'{int(r["Students"]):,}'
+            val = r["Budget"]
+            row[3].text = "-" if pd.isna(val) else f"${val:,.0f}"
+    else:
+        doc.add_paragraph("No summary available for current filters.")
+
+    # Save to bytes
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+def build_pdf_report() -> bytes:
+    # Simple PDF snapshot (KPIs + summary lines)
+    bio = io.BytesIO()
+    c = canvas.Canvas(bio, pagesize=LETTER)
+    width, height = LETTER
+    y = height - 1.0*inch
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(1.0*inch, y, "Education Abroad Budget Snapshot")
+    y -= 0.3*inch
+    c.setFont("Helvetica", 10)
+    dt_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    src_label = DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH) else "Uploaded file"
+    c.drawString(1.0*inch, y, f"Generated: {dt_label}")
+    y -= 0.2*inch
+    c.drawString(1.0*inch, y, f"Data source: {src_label}")
+
+    y -= 0.35*inch
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(1.0*inch, y, "Key Metrics")
+    c.setFont("Helvetica", 10)
+    y -= 0.25*inch
+    lines = [
+        f"Confirmed Students: {conf_students:,}",
+        f"Confirmed Budget Exposure: {fmt_money(conf_budget)}",
+        f"Pending Students: {pend_students:,}",
+        f"Pending Budget Exposure: {fmt_money(pend_budget)}",
+        f"Total Students: {total_students:,}",
+        f"Total Budget Exposure: {fmt_money(total_budget)}",
+    ]
+    for line in lines:
+        c.drawString(1.0*inch, y, line); y -= 0.2*inch
+
+    y -= 0.2*inch
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(1.0*inch, y, "Budget Summary by Status")
+    y -= 0.25*inch
+    c.setFont("Helvetica", 10)
+    if summary.empty:
+        c.drawString(1.0*inch, y, "No summary available for current filters.")
+    else:
+        for _, r in summary.iterrows():
+            s = f"{r['Cohort']} — {r['Status']}: Students {int(r['Students']):,}, Budget " + \
+                ("-" if pd.isna(r['Budget']) else f"${r['Budget']:,.0f}")
+            c.drawString(1.0*inch, y, s)
+            y -= 0.18*inch
+            if y < 1.0*inch:
+                c.showPage()
+                y = height - 1.0*inch
+                c.setFont("Helvetica", 10)
+
+    c.showPage()
+    c.save()
+    return bio.getvalue()
+
+# ------------------------------ Downloads (Report & Workbook) ------------------------------
+st.subheader("Exports")
+
+colA, colB, colC = st.columns(3)
+
+with colA:
+    docx_bytes = build_docx_report()
+    st.download_button(
+        "Download Report (Word, .docx)",
+        data=docx_bytes,
+        file_name="EducationAbroad_Budget_Snapshot.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+with colB:
+    pdf_bytes = build_pdf_report()
+    st.download_button(
+        "Download Report (PDF, .pdf)",
+        data=pdf_bytes,
+        file_name="EducationAbroad_Budget_Snapshot.pdf",
+        mime="application/pdf",
+    )
+
+with colC:
+    # Excel workbook with program breakdowns + summary
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        if not agg_confirmed.empty:
+            tbl_c.to_excel(writer, index=False, sheet_name="Confirmed_Program_Breakdown")
+        if not agg_pending.empty:
+            tbl_p.to_excel(writer, index=False, sheet_name="Pending_Program_Breakdown")
+        if not summary.empty:
+            summary.to_excel(writer, index=False, sheet_name="Budget_Summary_by_Status")
+    st.download_button(
+        "Download Workbook (.xlsx)",
+        data=out.getvalue(),
+        file_name="EducationAbroad_Budget_Workbook.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
