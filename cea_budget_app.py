@@ -537,16 +537,27 @@ def build_pdf_report() -> bytes:
     if summary.empty:
         c.drawString(1.0*inch, y, "No summary available for current filters.")
     else:
+        # for _, r in summary.iterrows():
+        #     s = f"{r['Cohort']} — {r['Status']}: Students {int(r['Students']):,}, Budget " + \
+        #         ("-" if pd.isna(r['Budget']) else f\"${r['Budget']:,.0f}\")
+        #     c.drawString(1.0*inch, y, s)
+        #     y -= 0.18*inch
+        #     if y < 1.0*inch:
+        #         c.showPage()
+        #         y = height - 1.0*inch
+        #         c.setFont("Helvetica", 10)
         for _, r in summary.iterrows():
-            s = f"{r['Cohort']} — {r['Status']}: Students {int(r['Students']):,}, Budget " + \
-                ("-" if pd.isna(r['Budget']) else f\"${r['Budget']:,.0f}\")
+            s = (
+                f"{r['Cohort']} — {r['Status']}: "
+                f"Students {int(r['Students']):,}, "
+                f"Budget " + ("-" if pd.isna(r['Budget']) else f"${r['Budget']:,.0f}")
+            )
             c.drawString(1.0*inch, y, s)
             y -= 0.18*inch
             if y < 1.0*inch:
                 c.showPage()
                 y = height - 1.0*inch
                 c.setFont("Helvetica", 10)
-
     c.showPage()
     c.save()
     return bio.getvalue()
