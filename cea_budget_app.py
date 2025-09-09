@@ -263,9 +263,9 @@ def aggregate_by_program_status(df, costs, group_label):
     merged["Cost per Student (USD)"] = merged["__Cost"]
     merged["Budget (USD)"] = merged["Student Count"] * merged["__Cost"]
 
-    merged["Cohort"] = group_label
+    # merged["Cohort"] = group_label
 
-    return merged[["Program","Status","Student Count","Cost per Student (USD)","Budget (USD)","Cohort"]]
+    return merged[["Program","Status","Student Count","Cost per Student (USD)","Budget (USD)"]]
 
 def kpi_row(df):
     total_students = int(df["Student Count"].sum()) if not df.empty else 0
