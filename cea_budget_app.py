@@ -397,11 +397,11 @@ pending_students_export   = build_student_export(pending)
 combined_students_export = pd.DataFrame()
 if not confirmed_students_export.empty:
     tmp = confirmed_students_export.copy()
-    tmp.insert(0, "Cohort", "Confirmed / Approved")
+    tmp.insert(0, "Cohort", "Approved")
     combined_students_export = pd.concat([combined_students_export, tmp], ignore_index=True)
 if not pending_students_export.empty:
     tmp = pending_students_export.copy()
-    tmp.insert(0, "Cohort", "Preliminary / Pending")
+    tmp.insert(0, "Cohort", "Pending")
     combined_students_export = pd.concat([combined_students_export, tmp], ignore_index=True)
 
 st.subheader("All Students — Combined List")
@@ -415,20 +415,20 @@ st.subheader("Student Lists — Downloads")
 c1, c2, c3 = st.columns(3)
 with c1:
     if confirmed_students_export.empty:
-        st.button("Download Confirmed /Approved (CSV)", disabled=True)
+        st.button("Download Approved (CSV)", disabled=True)
     else:
         st.download_button(
-            "Download Confirmed / Approved (CSV)",
+            "Download Approved (CSV)",
             data=confirmed_students_export.to_csv(index=False).encode("utf-8"),
             file_name="confirmed_approved_students.csv",
             mime="text/csv"
         )
 with c2:
     if pending_students_export.empty:
-        st.button("Download Preliminary / Pending (CSV)", disabled=True)
+        st.button("Download Pending (CSV)", disabled=True)
     else:
         st.download_button(
-            "Download Preliminary / Pending (CSV)",
+            "Download Pending (CSV)",
             data=pending_students_export.to_csv(index=False).encode("utf-8"),
             file_name="preliminary_pending_students.csv",
             mime="text/csv"
