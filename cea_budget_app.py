@@ -336,12 +336,12 @@ filtered = dedup_students_by_priority_then_cost(filtered, COSTS)
 CONFIRMED_STATUSES = ["Committed", "Permission to Study Abroad: Granted", "Provisional Permission"]
 confirmed = filtered[filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
 pending   = filtered[~filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
-confirmed["__Group"] = "Confirmed / Approved"
-pending["__Group"]   = "Preliminary / Pending"
+confirmed["__Group"] = "Approved"
+pending["__Group"]   = "Pending"
 
 # ------------------------------ Aggregation & KPIs ------------------------------
-agg_confirmed = aggregate_by_program_status(confirmed, COSTS, "Confirmed / Approved")
-agg_pending   = aggregate_by_program_status(pending,   COSTS, "Preliminary / Pending")
+agg_confirmed = aggregate_by_program_status(confirmed, COSTS, "Approved")
+agg_pending   = aggregate_by_program_status(pending,   COSTS, "Pending")
 
 conf_students, conf_budget = kpi_row(agg_confirmed)
 pend_students, pend_budget = kpi_row(agg_pending)
@@ -457,8 +457,8 @@ def totals_by(df, label):
     return t
 
 summary = pd.concat([
-    totals_by(agg_confirmed, "Confirmed / Approved"),
-    totals_by(agg_pending,   "Preliminary / Pending"),
+    totals_by(agg_confirmed, "Approved"),
+    totals_by(agg_pending,   "Pending"),
 ], ignore_index=True)
 
 st.subheader("Budget Summary by Status")
