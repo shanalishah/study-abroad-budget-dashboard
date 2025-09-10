@@ -45,16 +45,13 @@ _TS_RE = re.compile(r"^(\d{2}|\d{4})(\d{1,2})(\d{1,2})(\d{3,6})$")
 def _parse_time_tail(hms: str):
     """
     Parse a compact time string of length 3..6 into (hour, minute, second),
-    where each component may be 1–2 digits. We assign digits from the right:
-      - seconds = 1 or 2 digits (prefer 2 when available)
-      - minutes = 1 or 2 digits (prefer 2 when available)
-      - hours   = remaining 1 or 2 digits
+    where each component may be 1–2 digits. Assign from the right.
     """
     n = len(hms)
     if not (3 <= n <= 6):
         raise ValueError("Invalid time block length")
 
-    # Seconds: take last 2 if possible, otherwise last 1
+    # Seconds
     if n >= 5:
         ss = int(hms[-2:])
         rest = hms[:-2]
@@ -62,11 +59,10 @@ def _parse_time_tail(hms: str):
         ss = int(hms[-1:])
         rest = hms[:-1]
 
-    # Minutes: from remaining, take last 2 if possible, otherwise last 1
-    mlen = len(rest)
-    if mlen == 0:
+    # Minutes
+    if len(rest) == 0:
         raise ValueError("Missing minutes/hours")
-    if mlen >= 3:
+    if len(rest) >= 3:
         mm = int(rest[-2:])
         hh_str = rest[:-2]
     else:
@@ -77,24 +73,20 @@ def _parse_time_tail(hms: str):
         raise ValueError("Invalid hours")
     hh = int(hh_str)
 
-    # basic sanity (not strictly necessary; keeps garbage out)
     if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
         raise ValueError("Out-of-range time")
-
     return hh, mm, ss
 
 def parse_filename_to_dt(stem: str) -> datetime | None:
     """
-    Parse stems like:
-      YYYY M D H[H] M[M] S[S]  -> total last block length 3..6
-      YY   M D H[H] M[M] S[S]  (two-digit year becomes 20YY)
-    Returns naive datetime (no tz); None if it doesn't match.
+    Accepts: YYYY|YY  M  D  H[H]M[M]S[S]  (time tail length 3..6).
+    2-digit years are interpreted as 20YY (e.g., '25' -> 2025).
     """
     m = _TS_RE.match(stem)
     if not m:
         return None
     y_str, mo_str, d_str, hms = m.groups()
-    year = int(y_str) if len(y_str) == 4 else 2000 + int(y_str)  # interpret 2-digit year as 20YY
+    year = int(y_str) if len(y_str) == 4 else 2000 + int(y_str)
     month = int(mo_str)
     day = int(d_str)
     hh, mm, ss = _parse_time_tail(hms)
@@ -120,11 +112,10 @@ def find_latest_app_file() -> Path | None:
     return candidates[-1][0]
 
 def parse_timestamp_label(stem: str) -> str:
-    """Pretty label for sidebar source display (always rendered in ET)."""
+    """Pretty label for sidebar source display (rendered in ET)."""
     dt = parse_filename_to_dt(stem)
     if dt is None:
         return stem
-    # treat filename datetime as naive local stamp; show as ET for consistency
     et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
     return et.strftime("%Y-%m-%d %H:%M:%S %Z")
 
@@ -164,21 +155,18 @@ def read_any_table(file_or_path, default_sep="\t"):
     """
     Read tab-delimited first; fall back to CSV.
     Works for file-like or Path/str. Trims whitespace.
-    Uses forgiving encodings to avoid UnicodeDecodeError.
+    Uses forgiving encodings.
     """
     if file_or_path is None:
         return None
-    # Try tab-delimited
     try:
         df = _read_csv_forgiving(file_or_path, sep=default_sep, dtype=str)
     except Exception:
-        # Reset pointer if file-like
         if hasattr(file_or_path, "seek"):
             try:
                 file_or_path.seek(0)
             except Exception:
                 pass
-        # Try comma-delimited
         df = _read_csv_forgiving(file_or_path, sep=",", dtype=str)
 
     df.columns = [c.strip() for c in df.columns]
