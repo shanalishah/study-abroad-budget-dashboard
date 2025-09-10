@@ -447,13 +447,13 @@ with c3:
 # ------------------------------ Summary table ------------------------------
 def totals_by(df, label):
     if df.empty:
-        return pd.DataFrame(columns=["Status","Students","Budget"])
+        return pd.DataFrame(columns=["Cohort","Status","Students","Budget"])
     t = (
         df.groupby("Status", dropna=False)[["Student Count","Budget (USD)"]]
           .sum(min_count=1).reset_index()
           .rename(columns={"Student Count":"Students","Budget (USD)":"Budget"})
     )
-    # t.insert(0, "Cohort", label)
+    t.insert(0, "Cohort", label)
     return t
 
 summary = pd.concat([
