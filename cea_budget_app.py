@@ -269,49 +269,51 @@ def coalesce_program_keys(name):
 # ------------------------------ Column resolver (robust) ------------------------------
 def resolve_columns(df: pd.DataFrame):
     """
-    Resolve required logical columns from a variety of header spellings.
-    Returns (resolved_map, missing_keys) where resolved_map maps each logical key
-    ('Program_Name','Application_Status','Program_Term','Program_Year') to the
-    ORIGINAL column name in the dataframe.
+    Resolve logical columns from flexible header spellings (case/space/underscore/punct-insensitive)
+    and tolerate hidden characters. Returns (resolved, missing) where resolved maps each logical key
+    to the ORIGINAL column name in df.
     """
-    # Normalizer: lowercase, remove spaces/underscores/punctuation
+    # normalize headers: lowercase, strip, remove separators + non-word
     def norm(s: str) -> str:
-        s = str(s).strip().lower()
+        s = str(s)
+        # strip regular whitespace and common invisibles
+        s = s.replace("\ufeff", "").replace("\u200b", "").strip()  # BOM, zero-width space
+        s = s.lower()
         s = re.sub(r"[\s_\-:/]+", "", s)   # collapse common separators
         s = re.sub(r"[^\w]", "", s)        # drop non-word chars
         return s
 
-    # Build lookup from normalized -> original
+    # normalized -> original
     norm_to_orig = {}
     for col in df.columns:
         n = norm(col)
-        norm_to_orig.setdefault(n, col)  # keep first seen
+        if n and n not in norm_to_orig:
+            norm_to_orig[n] = col  # keep first occurrence
 
-    # Candidate normalized names for each required logical key
-    candidates = {
+    # alias sets (normalized)
+    aliases = {
         "Program_Name": [
-            "programname", "program", "programtitle", "name",
-            "program_name", "programnm", "programid", "programidname"
+            "programname","program","programtitle","name",
+            "program_name","programnm","programid","programidname",
         ],
         "Application_Status": [
-            "applicationstatus", "status", "appstatus", "decision",
-            "application_status", "admitstatus", "currentstatus"
+            "applicationstatus","status","appstatus","decision",
+            "application_status","admitstatus","currentstatus",
         ],
         "Program_Term": [
-            "programterm", "term", "academicterm", "programsemester",
-            "program_term", "semester", "session"
+            "programterm","term","academicterm","programsemester",
+            "program_term","semester","session",
         ],
         "Program_Year": [
-            "programyear", "year", "academicyear", "programyr",
-            "program_year"
+            "programyear","year","academicyear","programyr","program_year",
         ],
     }
 
     resolved = {}
-    for key, cand_list in candidates.items():
+    for key, cands in aliases.items():
         match = None
         # 1) direct alias match
-        for c in cand_list:
+        for c in cands:
             if c in norm_to_orig:
                 match = norm_to_orig[c]
                 break
@@ -460,11 +462,16 @@ uploaded_apps = st.sidebar.file_uploader("Upload export (optional)", type=["txt"
 if "use_repo_default" not in st.session_state:
     st.session_state.use_repo_default = True
 
+# If a file is uploaded this run, prefer it
 if uploaded_apps is not None:
     st.session_state.use_repo_default = False
 
 if st.sidebar.button("Use latest repository file"):
     st.session_state.use_repo_default = True
+else:
+    # If there is an uploaded file this run, keep preferring it
+    if uploaded_apps is not None:
+        st.session_state.use_repo_default = False
 
 DEFAULT_APPS_PATH = find_latest_app_file()
 if st.session_state.use_repo_default:
@@ -484,9 +491,28 @@ if apps_df is None or apps_df.empty:
     st.stop()
 
 resolved, missing = resolve_columns(apps_df)
-if missing:
-    st.error(f"Missing expected columns in applications data: {missing}")
+
+# Require only Program + Status; Term/Year optional
+required = {"Program_Name", "Application_Status"}
+missing_required = [k for k in required if k not in resolved]
+
+if missing_required:
+    with st.sidebar.expander("Debug: columns in uploaded data", expanded=False):
+        st.write(list(apps_df.columns))
+        st.write({"resolved": resolved, "missing": missing})
+    st.error(
+        "Missing required columns in applications data: "
+        + ", ".join(missing_required)
+        + ". I accept flexible names like 'Program'/'Status' too."
+    )
     st.stop()
+
+optional_missing = [k for k in ["Program_Term","Program_Year"] if k not in resolved]
+if optional_missing:
+    st.warning(
+        "Optional columns not found: " + ", ".join(optional_missing)
+        + ". Continuing without term/year filters."
+    )
 
 # Normalize fields
 apps_df["__Program"] = apps_df[resolved["Program_Name"]].map(coalesce_program_keys)
