@@ -260,7 +260,7 @@ def resolve_columns(df: pd.DataFrame):
         "Program_Year": ["Program_Year", "Program Year"],
     }
     resolved = {}
-    for key, candidates in expected in items():
+    for key, candidates in expected.items():
         for c in candidates:
             if c in df.columns:
                 resolved[key] = c
