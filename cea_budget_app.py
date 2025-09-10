@@ -160,14 +160,14 @@ def find_latest_app_file() -> Path | None:
         except Exception as e:
             seen_rows.append((f"{d}/*", "(error listing)", f"ERROR: {e}"))
 
-    with st.sidebar.expander("Debug: detected .txt files", expanded=False):
-        if not seen_rows:
-            st.write("No .txt files found in: " + ", ".join(str(d) for d in _candidate_dirs()))
-        else:
-            try:
-                st.write(pd.DataFrame(seen_rows, columns=["path", "stem", "parsed_dt"]))
-            except Exception:
-                st.write(seen_rows)
+    # with st.sidebar.expander("Debug: detected .txt files", expanded=False):
+    #     if not seen_rows:
+    #         st.write("No .txt files found in: " + ", ".join(str(d) for d in _candidate_dirs()))
+    #     else:
+    #         try:
+    #             st.write(pd.DataFrame(seen_rows, columns=["path", "stem", "parsed_dt"]))
+    #         except Exception:
+    #             st.write(seen_rows)
 
     if not candidates:
         return None
