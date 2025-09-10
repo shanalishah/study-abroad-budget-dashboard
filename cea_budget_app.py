@@ -33,8 +33,7 @@ def _candidate_dirs():
     raw_dirs = [
         Path("./data"),
         Path("."),
-
-        # Common paths when running on Streamlit Cloud from repo checkout:
+        # Common Streamlit Cloud repo paths:
         Path("/mount/src/study-abroad-budget-dashboard"),
         Path("/mount/src/study-abroad-budget-dashboard/data"),
     ]
@@ -49,13 +48,11 @@ def _candidate_dirs():
             out.append(dp)
     return out
 
-# ---------- Robust timestamp parsing helpers (accept 2/4-digit year; 1–2 digit H/M/S) ----------
-_TS_RE = re.compile(r"^(\d{2}|\d{4})(\d{1,2})(\d{1,2})(\d{3,6})$")
-
+# ---------- Robust timestamp parsing helpers (handle ambiguity) ----------
 def _parse_time_tail(hms: str):
     """
     Parse a compact time string of length 3..6 into (hour, minute, second),
-    assigning from the right: SS, MM, HH, with each part 1–2 digits.
+    assigning from the right: SS, MM, HH (each 1–2 digits).
     """
     n = len(hms)
     if not (3 <= n <= 6):
@@ -89,21 +86,45 @@ def _parse_time_tail(hms: str):
 
 def parse_filename_to_dt(stem: str) -> datetime | None:
     """
-    Accepts: YYYY|YY  M  D  H[H]M[M]S[S]  (time tail length 3..6).
-    2-digit years are interpreted as 20YY (e.g., '25' -> 2025).
+    Parse stems like:
+      YYYY or YY, then M(1–2), D(1–2), and time tail H(1–2)M(1–2)S(1–2) with total length 3..6.
+    We try all plausible splits and return the first valid datetime.
+    Two-digit years are interpreted as 20YY.
     """
-    m = _TS_RE.match(stem)
-    if not m:
+    if not stem.isdigit():
         return None
-    y_str, mo_str, d_str, hms = m.groups()
-    year = int(y_str) if len(y_str) == 4 else 2000 + int(y_str)
-    month = int(mo_str)
-    day = int(d_str)
-    hh, mm, ss = _parse_time_tail(hms)
-    try:
-        return datetime(year, month, day, hh, mm, ss)
-    except ValueError:
+    L = len(stem)
+    # Minimal length: 4y + 1m + 1d + 3time = 9
+    if L < 7:  # allow 2y + 1m + 1d + 3time
         return None
+
+    # Try 4-digit year first, then 2-digit
+    for ylen in (4, 2):
+        if L <= ylen + 1 + 1 + 2:  # need at least 3 digits for time tail
+            continue
+        try:
+            year_raw = int(stem[:ylen])
+        except ValueError:
+            continue
+        year = year_raw if ylen == 4 else 2000 + year_raw
+
+        # Try month/day as 1 or 2 digits each
+        for mlen in (1, 2):
+            for dlen in (1, 2):
+                idx_time = ylen + mlen + dlen
+                if idx_time >= L:
+                    continue
+                tail = stem[idx_time:]
+                if not (3 <= len(tail) <= 6):
+                    continue
+                try:
+                    month = int(stem[ylen:ylen+mlen])
+                    day   = int(stem[ylen+mlen:ylen+mlen+dlen])
+                    hh, mm, ss = _parse_time_tail(tail)
+                    return datetime(year, month, day, hh, mm, ss)
+                except Exception:
+                    continue
+    return None
 
 def find_cost_file() -> Path | None:
     """
@@ -116,10 +137,8 @@ def find_cost_file() -> Path | None:
             p = d / f"ProgramCost{ext}"
             if p.exists():
                 candidates.append(p)
-
     if not candidates:
         return None
-
     preference = {".tsv": 0, ".txt": 0, ".csv": 1, ".yaml": 2, ".yml": 2, ".json": 3}
     candidates.sort(key=lambda p: (preference.get(p.suffix.lower(), 9), str(p)))
     return candidates[0]
@@ -127,10 +146,9 @@ def find_cost_file() -> Path | None:
 def find_latest_app_file() -> Path | None:
     """
     Search likely locations for timestamped .txt files and pick the newest by parsed datetime.
-    Looks in priority order via _candidate_dirs().
     """
     candidates: list[tuple[Path, datetime]] = []
-    seen_rows = []  # for optional debug
+    seen_rows = []  # for sidebar debug
 
     for d in _candidate_dirs():
         try:
@@ -142,7 +160,6 @@ def find_latest_app_file() -> Path | None:
         except Exception as e:
             seen_rows.append((f"{d}/*", "(error listing)", f"ERROR: {e}"))
 
-    # Debug expander to inspect what was detected/parsing
     with st.sidebar.expander("Debug: detected .txt files", expanded=False):
         if not seen_rows:
             st.write("No .txt files found in: " + ", ".join(str(d) for d in _candidate_dirs()))
@@ -154,7 +171,6 @@ def find_latest_app_file() -> Path | None:
 
     if not candidates:
         return None
-
     candidates.sort(key=lambda t: t[1])  # newest last
     return candidates[-1][0]
 
@@ -244,7 +260,7 @@ def resolve_columns(df: pd.DataFrame):
         "Program_Year": ["Program_Year", "Program Year"],
     }
     resolved = {}
-    for key, candidates in expected.items():
+    for key, candidates in expected items():
         for c in candidates:
             if c in df.columns:
                 resolved[key] = c
@@ -492,7 +508,7 @@ def build_student_export(df):
 confirmed_students_export = build_student_export(confirmed)
 pending_students_export   = build_student_export(pending)
 
-# Combined list SHOULD KEEP Cohort (per your request)
+# Combined list SHOULD KEEP Cohort
 combined_students_export = pd.DataFrame()
 if not confirmed_students_export.empty:
     tmp = confirmed_students_export.copy()
