@@ -449,11 +449,11 @@ if apps_df is None or apps_df.empty:
     st.stop()
 
 # Show the real headers briefly (collapsed) to help debugging if needed
-with st.expander("Debug: raw headers from loaded applications file", expanded=False):
-    try:
-        st.write(list(apps_df.columns))
-    except Exception:
-        st.write("Could not display columns.")
+# with st.expander("Debug: raw headers from loaded applications file", expanded=False):
+#     try:
+#         st.write(list(apps_df.columns))
+#     except Exception:
+#         st.write("Could not display columns.")
 
 resolved, missing = resolve_columns(apps_df)
 if missing:
