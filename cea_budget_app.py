@@ -5,6 +5,7 @@ import json
 import hashlib
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
@@ -38,29 +39,94 @@ def find_cost_file() -> Path | None:
     candidates.sort(key=lambda p: preference.get(p.suffix.lower(), 9))
     return candidates[0] if candidates else None
 
+# ---------- Robust timestamp parsing helpers (accept 2/4-digit year; 1–2 digit H/M/S) ----------
+_TS_RE = re.compile(r"^(\d{2}|\d{4})(\d{1,2})(\d{1,2})(\d{3,6})$")
+
+def _parse_time_tail(hms: str):
+    """
+    Parse a compact time string of length 3..6 into (hour, minute, second),
+    where each component may be 1–2 digits. We assign digits from the right:
+      - seconds = 1 or 2 digits (prefer 2 when available)
+      - minutes = 1 or 2 digits (prefer 2 when available)
+      - hours   = remaining 1 or 2 digits
+    """
+    n = len(hms)
+    if not (3 <= n <= 6):
+        raise ValueError("Invalid time block length")
+
+    # Seconds: take last 2 if possible, otherwise last 1
+    if n >= 5:
+        ss = int(hms[-2:])
+        rest = hms[:-2]
+    else:
+        ss = int(hms[-1:])
+        rest = hms[:-1]
+
+    # Minutes: from remaining, take last 2 if possible, otherwise last 1
+    mlen = len(rest)
+    if mlen == 0:
+        raise ValueError("Missing minutes/hours")
+    if mlen >= 3:
+        mm = int(rest[-2:])
+        hh_str = rest[:-2]
+    else:
+        mm = int(rest[-1:])
+        hh_str = rest[:-1]
+
+    if not (1 <= len(hh_str) <= 2):
+        raise ValueError("Invalid hours")
+    hh = int(hh_str)
+
+    # basic sanity (not strictly necessary; keeps garbage out)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+        raise ValueError("Out-of-range time")
+
+    return hh, mm, ss
+
+def parse_filename_to_dt(stem: str) -> datetime | None:
+    """
+    Parse stems like:
+      YYYY M D H[H] M[M] S[S]  -> total last block length 3..6
+      YY   M D H[H] M[M] S[S]  (two-digit year becomes 20YY)
+    Returns naive datetime (no tz); None if it doesn't match.
+    """
+    m = _TS_RE.match(stem)
+    if not m:
+        return None
+    y_str, mo_str, d_str, hms = m.groups()
+    year = int(y_str) if len(y_str) == 4 else 2000 + int(y_str)  # interpret 2-digit year as 20YY
+    month = int(mo_str)
+    day = int(d_str)
+    hh, mm, ss = _parse_time_tail(hms)
+    try:
+        return datetime(year, month, day, hh, mm, ss)
+    except ValueError:
+        return None
+
 def find_latest_app_file() -> Path | None:
-    """Pick the newest applications file by numeric value of its timestamp stem (e.g., 202594152731.txt)."""
-    ts_re = re.compile(r"^(\d{4})(\d{1,2})(\d{1,2})(\d{6})$")
-    candidates = []
+    """
+    Pick the newest applications file using robust datetime parsing of the filename stem.
+    Accepts 2- or 4-digit year; 1–2-digit H/M/S (time block length 3..6).
+    """
+    candidates: list[tuple[Path, datetime]] = []
     for f in glob.glob("*.txt"):
-        stem = Path(f).stem
-        if stem.isdigit() and ts_re.match(stem):
-            candidates.append(Path(f))
+        p = Path(f)
+        dt = parse_filename_to_dt(p.stem)
+        if dt is not None:
+            candidates.append((p, dt))
     if not candidates:
         return None
-    return max(candidates, key=lambda p: int(p.stem))
+    candidates.sort(key=lambda t: t[1])
+    return candidates[-1][0]
 
 def parse_timestamp_label(stem: str) -> str:
-    ts_re = re.compile(r"^(\d{4})(\d{1,2})(\d{1,2})(\d{6})$")
-    m = ts_re.match(stem)
-    if not m:
+    """Pretty label for sidebar source display (always rendered in ET)."""
+    dt = parse_filename_to_dt(stem)
+    if dt is None:
         return stem
-    y, mo, d, hms = m.groups()
-    try:
-        dt = datetime(int(y), int(mo), int(d), int(hms[0:2]), int(hms[2:4]), int(hms[4:6]))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return stem
+    # treat filename datetime as naive local stamp; show as ET for consistency
+    et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
+    return et.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 # ------------------------------ Encoding-robust readers ------------------------------
 def _read_csv_forgiving(path_or_buf, sep, dtype=str):
@@ -244,11 +310,11 @@ def dedup_students_by_priority_then_cost(df_apps: pd.DataFrame, df_costs: pd.Dat
 def aggregate_by_program_status(df, costs, group_label):
     """
     Returns columns:
-      Program | Status | Student Count | Cost per Student (USD) | Budget (USD) | Cohort
+      Program | Status | Student Count | Cost per Student (USD) | Budget (USD)
     """
     if df.empty:
         return pd.DataFrame(columns=[
-            "Program","Status","Student Count","Cost per Student (USD)","Budget (USD)","Cohort"
+            "Program","Status","Student Count","Cost per Student (USD)","Budget (USD)"
         ])
 
     counts = (
@@ -262,8 +328,6 @@ def aggregate_by_program_status(df, costs, group_label):
 
     merged["Cost per Student (USD)"] = merged["__Cost"]
     merged["Budget (USD)"] = merged["Student Count"] * merged["__Cost"]
-
-    # merged["Cohort"] = group_label
 
     return merged[["Program","Status","Student Count","Cost per Student (USD)","Budget (USD)"]]
 
@@ -394,6 +458,7 @@ def build_student_export(df):
 confirmed_students_export = build_student_export(confirmed)
 pending_students_export   = build_student_export(pending)
 
+# Combined list SHOULD KEEP Cohort (per your request)
 combined_students_export = pd.DataFrame()
 if not confirmed_students_export.empty:
     tmp = confirmed_students_export.copy()
@@ -447,13 +512,12 @@ with c3:
 # ------------------------------ Summary table ------------------------------
 def totals_by(df, label):
     if df.empty:
-        return pd.DataFrame(columns=["Cohort","Status","Students","Budget"])
+        return pd.DataFrame(columns=["Status","Students","Budget"])
     t = (
         df.groupby("Status", dropna=False)[["Student Count","Budget (USD)"]]
           .sum(min_count=1).reset_index()
           .rename(columns={"Student Count":"Students","Budget (USD)":"Budget"})
     )
-    t.insert(0, "Cohort", label)
     return t
 
 summary = pd.concat([
@@ -475,7 +539,9 @@ if missing_cost:
 def build_docx_report() -> bytes:
     doc = Document()
     doc.add_heading("Education Abroad Budget Snapshot", level=1)
-    dt_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Always show ET with TZ label
+    dt_label = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S %Z")
     src_label = DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH) else "Uploaded file"
     doc.add_paragraph(f"Generated: {dt_label}")
     doc.add_paragraph(f"Data source: {src_label}")
@@ -488,19 +554,18 @@ def build_docx_report() -> bytes:
     doc.add_paragraph(f"Total Students: {total_students:,}")
     doc.add_paragraph(f"Total Budget Exposure: {fmt_money(total_budget)}")
 
-    # Summary table
+    # Summary table (no Cohort)
     doc.add_heading("Budget Summary by Status", level=2)
     if not summary.empty:
-        table = doc.add_table(rows=1, cols=4)
+        table = doc.add_table(rows=1, cols=3)
         hdr = table.rows[0].cells
-        hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = "Cohort", "Status", "Students", "Budget"
+        hdr[0].text, hdr[1].text, hdr[2].text = "Status", "Students", "Budget"
         for _, r in summary.iterrows():
             row = table.add_row().cells
-            row[0].text = str(r["Cohort"])
-            row[1].text = str(r["Status"])
-            row[2].text = f'{int(r["Students"]):,}'
+            row[0].text = str(r["Status"])
+            row[1].text = f'{int(r["Students"]):,}'
             val = r["Budget"]
-            row[3].text = "-" if pd.isna(val) else f"${val:,.0f}"
+            row[2].text = "-" if pd.isna(val) else f"${val:,.0f}"
     else:
         doc.add_paragraph("No summary available for current filters.")
 
@@ -518,7 +583,9 @@ def build_pdf_report() -> bytes:
     c.drawString(1.0*inch, y, "Education Abroad Budget Snapshot")
     y -= 0.3*inch
     c.setFont("Helvetica", 10)
-    dt_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Always show ET with TZ label
+    dt_label = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S %Z")
     src_label = DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH) else "Uploaded file"
     c.drawString(1.0*inch, y, f"Generated: {dt_label}")
     y -= 0.2*inch
@@ -540,9 +607,7 @@ def build_pdf_report() -> bytes:
     for line in lines:
         c.drawString(1.0*inch, y, line); y -= 0.2*inch
         if y < 1.0*inch:
-            c.showPage()
-            y = height - 1.0*inch
-            c.setFont("Helvetica", 10)
+            c.showPage(); y = height - 1.0*inch; c.setFont("Helvetica", 10)
 
     y -= 0.2*inch
     c.setFont("Helvetica-Bold", 12)
@@ -553,17 +618,13 @@ def build_pdf_report() -> bytes:
         c.drawString(1.0*inch, y, "No summary available for current filters.")
     else:
         for _, r in summary.iterrows():
-            s = (
-                f"{r['Cohort']} — {r['Status']}: "
-                f"Students {int(r['Students']):,}, "
-                f"Budget " + ("-" if pd.isna(r['Budget']) else f"${r['Budget']:,.0f}")
+            s = f"{r['Status']}: Students {int(r['Students']):,}, Budget " + (
+                "-" if pd.isna(r['Budget']) else f"${r['Budget']:,.0f}"
             )
             c.drawString(1.0*inch, y, s)
             y -= 0.18*inch
             if y < 1.0*inch:
-                c.showPage()
-                y = height - 1.0*inch
-                c.setFont("Helvetica", 10)
+                c.showPage(); y = height - 1.0*inch; c.setFont("Helvetica", 10)
 
     c.showPage()
     c.save()
