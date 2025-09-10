@@ -429,8 +429,8 @@ if st.sidebar.button("Use latest repository file"):
 DEFAULT_APPS_PATH = find_latest_app_file()
 
 # --- Quick debug so we always know what file got picked
-with st.sidebar.expander("Debug: chosen repo file", expanded=False):
-    st.write(str(DEFAULT_APPS_PATH) if DEFAULT_APPS_PATH else "(none found)")
+# with st.sidebar.expander("Debug: chosen repo file", expanded=False):
+#     st.write(str(DEFAULT_APPS_PATH) if DEFAULT_APPS_PATH else "(none found)")
 
 if st.session_state.use_repo_default:
     if DEFAULT_APPS_PATH:
