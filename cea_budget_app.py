@@ -4,7 +4,7 @@ import glob
 import json
 import hashlib
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
@@ -86,20 +86,22 @@ def _parse_time_tail(hms: str):
 
 def parse_filename_to_dt(stem: str) -> datetime | None:
     """
-    Parse stems like:
-      YYYY or YY, then M(1–2), D(1–2), and time tail H(1–2)M(1–2)S(1–2) with total length 3..6.
-    We try all plausible splits and return the first valid datetime.
-    Two-digit years are interpreted as 20YY.
+    Parse stems of digits into a datetime by trying all plausible splits:
+      - Year: 4 or 2 digits (2-digit interpreted as 20YY)
+      - Month/Day: 1–2 digits each
+      - Time tail (H[H]M[M]S[S]): total length 3..6, components 1–2 digits each
+    Return the **latest** valid datetime among all candidates.
     """
     if not stem.isdigit():
         return None
+
     L = len(stem)
-    # Minimal length: 4y + 1m + 1d + 3time = 9
-    if L < 7:  # allow 2y + 1m + 1d + 3time
+    if L < 7:  # minimal is 2y + 1m + 1d + 3time
         return None
 
-    # Try 4-digit year first, then 2-digit
-    for ylen in (4, 2):
+    candidates: list[datetime] = []
+
+    for ylen in (4, 2):  # try 4-digit year first, then 2-digit
         if L <= ylen + 1 + 1 + 2:  # need at least 3 digits for time tail
             continue
         try:
@@ -108,7 +110,6 @@ def parse_filename_to_dt(stem: str) -> datetime | None:
             continue
         year = year_raw if ylen == 4 else 2000 + year_raw
 
-        # Try month/day as 1 or 2 digits each
         for mlen in (1, 2):
             for dlen in (1, 2):
                 idx_time = ylen + mlen + dlen
@@ -121,10 +122,12 @@ def parse_filename_to_dt(stem: str) -> datetime | None:
                     month = int(stem[ylen:ylen+mlen])
                     day   = int(stem[ylen+mlen:ylen+mlen+dlen])
                     hh, mm, ss = _parse_time_tail(tail)
-                    return datetime(year, month, day, hh, mm, ss)
+                    dt = datetime(year, month, day, hh, mm, ss)
+                    candidates.append(dt)
                 except Exception:
                     continue
-    return None
+
+    return max(candidates) if candidates else None
 
 def find_cost_file() -> Path | None:
     """
@@ -143,39 +146,6 @@ def find_cost_file() -> Path | None:
     candidates.sort(key=lambda p: (preference.get(p.suffix.lower(), 9), str(p)))
     return candidates[0]
 
-# def find_latest_app_file() -> Path | None:
-#     """
-#     Search likely locations for timestamped .txt files and pick the newest by parsed datetime.
-#     """
-#     candidates: list[tuple[Path, datetime]] = []
-#     seen_rows = []  # for sidebar debug
-
-#     for d in _candidate_dirs():
-#         try:
-#             for p in d.glob("*.txt"):
-#                 dt = parse_filename_to_dt(p.stem)
-#                 seen_rows.append((str(p), p.stem, dt.isoformat() if dt else None))
-#                 if dt is not None:
-#                     candidates.append((p, dt))
-#         except Exception as e:
-#             seen_rows.append((f"{d}/*", "(error listing)", f"ERROR: {e}"))
-
-#     # with st.sidebar.expander("Debug: detected .txt files", expanded=False):
-#     #     if not seen_rows:
-#     #         st.write("No .txt files found in: " + ", ".join(str(d) for d in _candidate_dirs()))
-#     #     else:
-#     #         try:
-#     #             st.write(pd.DataFrame(seen_rows, columns=["path", "stem", "parsed_dt"]))
-#     #         except Exception:
-#     #             st.write(seen_rows)
-
-#     if not candidates:
-#         return None
-#     candidates.sort(key=lambda t: t[1])  # newest last
-#     return candidates[-1][0]
-
-from datetime import timezone
-
 def find_latest_app_file() -> Path | None:
     """
     Search likely locations for timestamped .txt files and pick the newest.
@@ -184,24 +154,7 @@ def find_latest_app_file() -> Path | None:
       - file's modification time (mtime).
     """
     candidates: list[tuple[Path, datetime, datetime, datetime]] = []
-    search_dirs = []
-    seen = set()
-
-    # Search roots
-    raw_dirs = [
-        Path("./data"),
-        Path("."),
-        Path("/mount/src/study-abroad-budget-dashboard"),
-        Path("/mount/src/study-abroad-budget-dashboard/data"),
-    ]
-    for d in raw_dirs:
-        try:
-            dp = d.resolve()
-        except Exception:
-            dp = d
-        if dp.exists() and str(dp) not in seen:
-            seen.add(str(dp))
-            search_dirs.append(dp)
+    search_dirs = _candidate_dirs()
 
     for d in search_dirs:
         try:
@@ -226,12 +179,22 @@ def find_latest_app_file() -> Path | None:
     return candidates[-1][0]
 
 def parse_timestamp_label(stem: str) -> str:
-    """Pretty label for sidebar source display (rendered in ET)."""
+    """Pretty label for sidebar source display (prefer parsed filename; fallback to mtime, show ET)."""
     dt = parse_filename_to_dt(stem)
-    if dt is None:
-        return stem
-    et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
-    return et.strftime("%Y-%m-%d %H:%M:%S %Z")
+    if dt is not None:
+        et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
+        return et.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+    # Fallback to mtime if file exists in ./data or .
+    for base in (Path("./data"), Path(".")):
+        p = base / f"{stem}.txt"
+        if p.exists():
+            try:
+                mt = datetime.fromtimestamp(p.stat().st_mtime, tz=ZoneInfo("America/New_York"))
+                return mt.strftime("%Y-%m-%d %H:%M:%S %Z")
+            except Exception:
+                break
+    return stem
 
 # ------------------------------ Encoding-robust readers ------------------------------
 def _read_csv_forgiving(path_or_buf, sep, dtype=str):
@@ -303,20 +266,70 @@ def coalesce_program_keys(name):
     s = re.sub(r"\s+", " ", s)
     return s
 
+# ------------------------------ Column resolver (robust) ------------------------------
 def resolve_columns(df: pd.DataFrame):
-    expected = {
-        "Program_Name": ["Program_Name", "Program Name"],
-        "Application_Status": ["Application_Status", "Application Status", "Status"],
-        "Program_Term": ["Program_Term", "Program Term"],
-        "Program_Year": ["Program_Year", "Program Year"],
+    """
+    Resolve required logical columns from a variety of header spellings.
+    Returns (resolved_map, missing_keys) where resolved_map maps each logical key
+    ('Program_Name','Application_Status','Program_Term','Program_Year') to the
+    ORIGINAL column name in the dataframe.
+    """
+    # Normalizer: lowercase, remove spaces/underscores/punctuation
+    def norm(s: str) -> str:
+        s = str(s).strip().lower()
+        s = re.sub(r"[\s_\-:/]+", "", s)   # collapse common separators
+        s = re.sub(r"[^\w]", "", s)        # drop non-word chars
+        return s
+
+    # Build lookup from normalized -> original
+    norm_to_orig = {}
+    for col in df.columns:
+        n = norm(col)
+        norm_to_orig.setdefault(n, col)  # keep first seen
+
+    # Candidate normalized names for each required logical key
+    candidates = {
+        "Program_Name": [
+            "programname", "program", "programtitle", "name",
+            "program_name", "programnm", "programid", "programidname"
+        ],
+        "Application_Status": [
+            "applicationstatus", "status", "appstatus", "decision",
+            "application_status", "admitstatus", "currentstatus"
+        ],
+        "Program_Term": [
+            "programterm", "term", "academicterm", "programsemester",
+            "program_term", "semester", "session"
+        ],
+        "Program_Year": [
+            "programyear", "year", "academicyear", "programyr",
+            "program_year"
+        ],
     }
+
     resolved = {}
-    for key, candidates in expected.items():
-        for c in candidates:
-            if c in df.columns:
-                resolved[key] = c
+    for key, cand_list in candidates.items():
+        match = None
+        # 1) direct alias match
+        for c in cand_list:
+            if c in norm_to_orig:
+                match = norm_to_orig[c]
                 break
-    missing = [k for k in expected if k not in resolved]
+        # 2) heuristic fallback
+        if match is None:
+            for nval, orig in norm_to_orig.items():
+                if key == "Program_Name" and (nval.startswith("program") or nval.endswith("name")):
+                    match = orig; break
+                if key == "Application_Status" and ("status" in nval or "decision" in nval):
+                    match = orig; break
+                if key == "Program_Term" and ("term" in nval or "semester" in nval or "session" in nval):
+                    match = orig; break
+                if key == "Program_Year" and nval.endswith("year"):
+                    match = orig; break
+        if match is not None:
+            resolved[key] = match
+
+    missing = [k for k in ["Program_Name","Application_Status","Program_Term","Program_Year"] if k not in resolved]
     return resolved, missing
 
 def file_md5(path: Path) -> str:
