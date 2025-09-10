@@ -143,35 +143,86 @@ def find_cost_file() -> Path | None:
     candidates.sort(key=lambda p: (preference.get(p.suffix.lower(), 9), str(p)))
     return candidates[0]
 
+# def find_latest_app_file() -> Path | None:
+#     """
+#     Search likely locations for timestamped .txt files and pick the newest by parsed datetime.
+#     """
+#     candidates: list[tuple[Path, datetime]] = []
+#     seen_rows = []  # for sidebar debug
+
+#     for d in _candidate_dirs():
+#         try:
+#             for p in d.glob("*.txt"):
+#                 dt = parse_filename_to_dt(p.stem)
+#                 seen_rows.append((str(p), p.stem, dt.isoformat() if dt else None))
+#                 if dt is not None:
+#                     candidates.append((p, dt))
+#         except Exception as e:
+#             seen_rows.append((f"{d}/*", "(error listing)", f"ERROR: {e}"))
+
+#     # with st.sidebar.expander("Debug: detected .txt files", expanded=False):
+#     #     if not seen_rows:
+#     #         st.write("No .txt files found in: " + ", ".join(str(d) for d in _candidate_dirs()))
+#     #     else:
+#     #         try:
+#     #             st.write(pd.DataFrame(seen_rows, columns=["path", "stem", "parsed_dt"]))
+#     #         except Exception:
+#     #             st.write(seen_rows)
+
+#     if not candidates:
+#         return None
+#     candidates.sort(key=lambda t: t[1])  # newest last
+#     return candidates[-1][0]
+
+from datetime import timezone
+
 def find_latest_app_file() -> Path | None:
     """
-    Search likely locations for timestamped .txt files and pick the newest by parsed datetime.
+    Search likely locations for timestamped .txt files and pick the newest.
+    Uses the later of:
+      - parsed datetime from filename (if any), and
+      - file's modification time (mtime).
     """
-    candidates: list[tuple[Path, datetime]] = []
-    seen_rows = []  # for sidebar debug
+    candidates: list[tuple[Path, datetime, datetime, datetime]] = []
+    search_dirs = []
+    seen = set()
 
-    for d in _candidate_dirs():
+    # Search roots
+    raw_dirs = [
+        Path("./data"),
+        Path("."),
+        Path("/mount/src/study-abroad-budget-dashboard"),
+        Path("/mount/src/study-abroad-budget-dashboard/data"),
+    ]
+    for d in raw_dirs:
+        try:
+            dp = d.resolve()
+        except Exception:
+            dp = d
+        if dp.exists() and str(dp) not in seen:
+            seen.add(str(dp))
+            search_dirs.append(dp)
+
+    for d in search_dirs:
         try:
             for p in d.glob("*.txt"):
-                dt = parse_filename_to_dt(p.stem)
-                seen_rows.append((str(p), p.stem, dt.isoformat() if dt else None))
-                if dt is not None:
-                    candidates.append((p, dt))
-        except Exception as e:
-            seen_rows.append((f"{d}/*", "(error listing)", f"ERROR: {e}"))
-
-    # with st.sidebar.expander("Debug: detected .txt files", expanded=False):
-    #     if not seen_rows:
-    #         st.write("No .txt files found in: " + ", ".join(str(d) for d in _candidate_dirs()))
-    #     else:
-    #         try:
-    #             st.write(pd.DataFrame(seen_rows, columns=["path", "stem", "parsed_dt"]))
-    #         except Exception:
-    #             st.write(seen_rows)
+                parsed = parse_filename_to_dt(p.stem)  # may be None
+                try:
+                    mtime = datetime.fromtimestamp(
+                        p.stat().st_mtime, tz=timezone.utc
+                    ).astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
+                except Exception:
+                    mtime = datetime.min
+                eff = max(parsed if parsed else datetime.min, mtime)
+                candidates.append((p, eff, parsed if parsed else datetime.min, mtime))
+        except Exception:
+            continue
 
     if not candidates:
         return None
-    candidates.sort(key=lambda t: t[1])  # newest last
+
+    # Sort by effective time, then mtime
+    candidates.sort(key=lambda t: (t[1], t[3]))
     return candidates[-1][0]
 
 def parse_timestamp_label(stem: str) -> str:
