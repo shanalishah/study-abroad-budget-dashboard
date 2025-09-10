@@ -28,16 +28,26 @@ st.title("Education Abroad Budget Dashboard")
 # ------------------------------ File discovery ------------------------------
 SUPPORTED_COST_EXTS = [".tsv", ".txt", ".csv", ".yaml", ".yml", ".json"]
 
-def find_cost_file() -> Path | None:
-    """Find ProgramCost file; prefer TSV/TXT, then CSV, then YAML/JSON."""
-    candidates = []
-    for ext in SUPPORTED_COST_EXTS:
-        p = Path(f"ProgramCost{ext}")
-        if p.exists():
-            candidates.append(p)
-    preference = {".tsv": 0, ".txt": 0, ".csv": 1, ".yaml": 2, ".yml": 2, ".json": 3}
-    candidates.sort(key=lambda p: preference.get(p.suffix.lower(), 9))
-    return candidates[0] if candidates else None
+def _candidate_dirs():
+    """Directories to search, in order of preference."""
+    raw_dirs = [
+        Path("./data"),
+        Path("."),
+
+        # Common paths when running on Streamlit Cloud from repo checkout:
+        Path("/mount/src/study-abroad-budget-dashboard"),
+        Path("/mount/src/study-abroad-budget-dashboard/data"),
+    ]
+    out, seen = [], set()
+    for d in raw_dirs:
+        try:
+            dp = d.resolve()
+        except Exception:
+            dp = d
+        if dp.exists() and str(dp) not in seen:
+            seen.add(str(dp))
+            out.append(dp)
+    return out
 
 # ---------- Robust timestamp parsing helpers (accept 2/4-digit year; 1–2 digit H/M/S) ----------
 _TS_RE = re.compile(r"^(\d{2}|\d{4})(\d{1,2})(\d{1,2})(\d{3,6})$")
@@ -45,7 +55,7 @@ _TS_RE = re.compile(r"^(\d{2}|\d{4})(\d{1,2})(\d{1,2})(\d{3,6})$")
 def _parse_time_tail(hms: str):
     """
     Parse a compact time string of length 3..6 into (hour, minute, second),
-    where each component may be 1–2 digits. Assign from the right.
+    assigning from the right: SS, MM, HH, with each part 1–2 digits.
     """
     n = len(hms)
     if not (3 <= n <= 6):
@@ -95,20 +105,57 @@ def parse_filename_to_dt(stem: str) -> datetime | None:
     except ValueError:
         return None
 
-def find_latest_app_file() -> Path | None:
+def find_cost_file() -> Path | None:
     """
-    Pick the newest applications file using robust datetime parsing of the filename stem.
-    Accepts 2- or 4-digit year; 1–2-digit H/M/S (time block length 3..6).
+    Find ProgramCost file; search ./data first, then other candidate dirs.
+    Prefer TSV/TXT, then CSV, then YAML/JSON.
     """
-    candidates: list[tuple[Path, datetime]] = []
-    for f in glob.glob("*.txt"):
-        p = Path(f)
-        dt = parse_filename_to_dt(p.stem)
-        if dt is not None:
-            candidates.append((p, dt))
+    candidates = []
+    for d in _candidate_dirs():
+        for ext in SUPPORTED_COST_EXTS:
+            p = d / f"ProgramCost{ext}"
+            if p.exists():
+                candidates.append(p)
+
     if not candidates:
         return None
-    candidates.sort(key=lambda t: t[1])
+
+    preference = {".tsv": 0, ".txt": 0, ".csv": 1, ".yaml": 2, ".yml": 2, ".json": 3}
+    candidates.sort(key=lambda p: (preference.get(p.suffix.lower(), 9), str(p)))
+    return candidates[0]
+
+def find_latest_app_file() -> Path | None:
+    """
+    Search likely locations for timestamped .txt files and pick the newest by parsed datetime.
+    Looks in priority order via _candidate_dirs().
+    """
+    candidates: list[tuple[Path, datetime]] = []
+    seen_rows = []  # for optional debug
+
+    for d in _candidate_dirs():
+        try:
+            for p in d.glob("*.txt"):
+                dt = parse_filename_to_dt(p.stem)
+                seen_rows.append((str(p), p.stem, dt.isoformat() if dt else None))
+                if dt is not None:
+                    candidates.append((p, dt))
+        except Exception as e:
+            seen_rows.append((f"{d}/*", "(error listing)", f"ERROR: {e}"))
+
+    # Debug expander to inspect what was detected/parsing
+    with st.sidebar.expander("Debug: detected .txt files", expanded=False):
+        if not seen_rows:
+            st.write("No .txt files found in: " + ", ".join(str(d) for d in _candidate_dirs()))
+        else:
+            try:
+                st.write(pd.DataFrame(seen_rows, columns=["path", "stem", "parsed_dt"]))
+            except Exception:
+                st.write(seen_rows)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda t: t[1])  # newest last
     return candidates[-1][0]
 
 def parse_timestamp_label(stem: str) -> str:
@@ -122,7 +169,7 @@ def parse_timestamp_label(stem: str) -> str:
 # ------------------------------ Encoding-robust readers ------------------------------
 def _read_csv_forgiving(path_or_buf, sep, dtype=str):
     """
-    Try encodings in order: utf-8, utf-8-sig (BOM), cp1252.
+    Try encodings: utf-8, utf-8-sig (BOM), cp1252.
     Replace undecodable bytes and skip truly broken lines.
     """
     encodings = ["utf-8", "utf-8-sig", "cp1252"]
@@ -155,7 +202,6 @@ def read_any_table(file_or_path, default_sep="\t"):
     """
     Read tab-delimited first; fall back to CSV.
     Works for file-like or Path/str. Trims whitespace.
-    Uses forgiving encodings.
     """
     if file_or_path is None:
         return None
@@ -530,7 +576,8 @@ def build_docx_report() -> bytes:
 
     # Always show ET with TZ label
     dt_label = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S %Z")
-    src_label = DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH) else "Uploaded file"
+    src_label = (DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH)
+                 else "Uploaded file")
     doc.add_paragraph(f"Generated: {dt_label}")
     doc.add_paragraph(f"Data source: {src_label}")
 
@@ -574,7 +621,8 @@ def build_pdf_report() -> bytes:
 
     # Always show ET with TZ label
     dt_label = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M:%S %Z")
-    src_label = DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH) else "Uploaded file"
+    src_label = (DEFAULT_APPS_PATH.name if (st.session_state.use_repo_default and DEFAULT_APPS_PATH)
+                 else "Uploaded file")
     c.drawString(1.0*inch, y, f"Generated: {dt_label}")
     y -= 0.2*inch
     c.drawString(1.0*inch, y, f"Data source: {src_label}")
