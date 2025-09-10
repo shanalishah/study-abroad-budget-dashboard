@@ -559,14 +559,14 @@ if not pending_students_export.empty:
     tmp.insert(0, "Cohort", "Pending")
     combined_students_export = pd.concat([combined_students_export, tmp], ignore_index=True)
 
-st.subheader("All Students — Combined List")
+st.subheader("All Students - Combined List")
 if combined_students_export.empty:
     st.write("No student records for the current filters.")
 else:
     st.dataframe(combined_students_export, use_container_width=True)
 
 # Downloads beneath the combined list
-st.subheader("Student Lists — Downloads")
+st.subheader("Student Lists - Downloads")
 c1, c2, c3 = st.columns(3)
 with c1:
     if confirmed_students_export.empty:
