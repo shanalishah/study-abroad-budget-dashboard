@@ -33,7 +33,6 @@ def _candidate_dirs():
     raw_dirs = [
         Path("./data"),
         Path("."),
-        # Common Streamlit Cloud repo paths:
         Path("/mount/src/study-abroad-budget-dashboard"),
         Path("/mount/src/study-abroad-budget-dashboard/data"),
     ]
@@ -48,7 +47,7 @@ def _candidate_dirs():
             out.append(dp)
     return out
 
-# ---------- Robust timestamp parsing helpers (handle ambiguity) ----------
+# ---------- Robust timestamp parsing helpers ----------
 def _parse_time_tail(hms: str):
     """
     Parse a compact time string of length 3..6 into (hour, minute, second),
@@ -90,7 +89,7 @@ def parse_filename_to_dt(stem: str) -> datetime | None:
       - Year: 4 or 2 digits (2-digit interpreted as 20YY)
       - Month/Day: 1–2 digits each
       - Time tail (H[H]M[M]S[S]): total length 3..6, components 1–2 digits each
-    Return the **latest** valid datetime among all candidates.
+    Return the latest valid datetime among all candidates.
     """
     if not stem.isdigit():
         return None
@@ -154,9 +153,7 @@ def find_latest_app_file() -> Path | None:
       - file's modification time (mtime).
     """
     candidates: list[tuple[Path, datetime, datetime, datetime]] = []
-    search_dirs = _candidate_dirs()
-
-    for d in search_dirs:
+    for d in _candidate_dirs():
         try:
             for p in d.glob("*.txt"):
                 parsed = parse_filename_to_dt(p.stem)  # may be None
@@ -185,7 +182,6 @@ def parse_timestamp_label(stem: str) -> str:
         et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
         return et.strftime("%Y-%m-%d %H:%M:%S %Z")
 
-    # Fallback to mtime if file exists in ./data or .
     for base in (Path("./data"), Path(".")):
         p = base / f"{stem}.txt"
         if p.exists():
@@ -266,70 +262,83 @@ def coalesce_program_keys(name):
     s = re.sub(r"\s+", " ", s)
     return s
 
-# ------------------------------ Column resolver (robust) ------------------------------
+# ------------------------------ Column resolver (extra-robust) ------------------------------
 def resolve_columns(df: pd.DataFrame):
     """
-    Resolve logical columns from flexible header spellings (case/space/underscore/punct-insensitive)
-    and tolerate hidden characters. Returns (resolved, missing) where resolved maps each logical key
-    to the ORIGINAL column name in df.
+    Resolve logical columns from flexible header spellings and tolerate hidden characters.
+    Returns (resolved, missing) where resolved maps each logical key to the ORIGINAL column name.
     """
-    # normalize headers: lowercase, strip, remove separators + non-word
     def norm(s: str) -> str:
         s = str(s)
-        # strip regular whitespace and common invisibles
-        s = s.replace("\ufeff", "").replace("\u200b", "").strip()  # BOM, zero-width space
+        s = s.replace("\ufeff", "").replace("\u200b", "").strip()  # BOM/ZWSP
         s = s.lower()
-        s = re.sub(r"[\s_\-:/]+", "", s)   # collapse common separators
+        s = re.sub(r"[\s_\-:/]+", "", s)   # collapse separators
         s = re.sub(r"[^\w]", "", s)        # drop non-word chars
         return s
 
-    # normalized -> original
+    # map normalized -> original
     norm_to_orig = {}
     for col in df.columns:
         n = norm(col)
         if n and n not in norm_to_orig:
-            norm_to_orig[n] = col  # keep first occurrence
+            norm_to_orig[n] = col
 
-    # alias sets (normalized)
-    aliases = {
-        "Program_Name": [
-            "programname","program","programtitle","name",
-            "program_name","programnm","programid","programidname",
-        ],
-        "Application_Status": [
-            "applicationstatus","status","appstatus","decision",
-            "application_status","admitstatus","currentstatus",
-        ],
-        "Program_Term": [
-            "programterm","term","academicterm","programsemester",
-            "program_term","semester","session",
-        ],
-        "Program_Year": [
-            "programyear","year","academicyear","programyr","program_year",
-        ],
-    }
+    # helper: choose first that matches a predicate
+    def choose(pred):
+        for nval, orig in norm_to_orig.items():
+            if pred(nval):
+                return orig
+        return None
+
+    # 1) Program_Name
+    program_aliases = [
+        "programname","program","programtitle","name","program_name","programnm","programid","programidname",
+    ]
+    prog = None
+    for a in program_aliases:
+        if a in norm_to_orig:
+            prog = norm_to_orig[a]; break
+    if prog is None:
+        # Heuristic: has 'program' but not clearly other program-* fields
+        def prog_pred(n):
+            return ("program" in n) and not any(
+                bad in n for bad in ["programterm","programyear","itinerary","location","college","degree"]
+            ) and (n.endswith("name") or n == "program" or "title" in n)
+        prog = choose(prog_pred)
+        # last resort: any 'program*' that isn't term/year
+        if prog is None:
+            prog = choose(lambda n: "program" in n and not any(b in n for b in ["programterm","programyear"]))
+
+    # 2) Application_Status
+    status_aliases = [
+        "applicationstatus","status","appstatus","decision","application_status","admitstatus","currentstatus",
+    ]
+    stat = None
+    for a in status_aliases:
+        if a in norm_to_orig:
+            stat = norm_to_orig[a]; break
+    if stat is None:
+        stat = choose(lambda n: ("status" in n) or (n == "decision") or n.endswith("status"))
+
+    # 3) Program_Term (optional)
+    term_aliases = ["programterm","term","academicterm","programsemester","program_term","semester","session"]
+    term = None
+    for a in term_aliases:
+        if a in norm_to_orig:
+            term = norm_to_orig[a]; break
+
+    # 4) Program_Year (optional)
+    year_aliases = ["programyear","year","academicyear","programyr","program_year"]
+    year = None
+    for a in year_aliases:
+        if a in norm_to_orig:
+            year = norm_to_orig[a]; break
 
     resolved = {}
-    for key, cands in aliases.items():
-        match = None
-        # 1) direct alias match
-        for c in cands:
-            if c in norm_to_orig:
-                match = norm_to_orig[c]
-                break
-        # 2) heuristic fallback
-        if match is None:
-            for nval, orig in norm_to_orig.items():
-                if key == "Program_Name" and (nval.startswith("program") or nval.endswith("name")):
-                    match = orig; break
-                if key == "Application_Status" and ("status" in nval or "decision" in nval):
-                    match = orig; break
-                if key == "Program_Term" and ("term" in nval or "semester" in nval or "session" in nval):
-                    match = orig; break
-                if key == "Program_Year" and nval.endswith("year"):
-                    match = orig; break
-        if match is not None:
-            resolved[key] = match
+    if prog:  resolved["Program_Name"] = prog
+    if stat:  resolved["Application_Status"] = stat
+    if term:  resolved["Program_Term"] = term
+    if year:  resolved["Program_Year"] = year
 
     missing = [k for k in ["Program_Name","Application_Status","Program_Term","Program_Year"] if k not in resolved]
     return resolved, missing
@@ -469,7 +478,6 @@ if uploaded_apps is not None:
 if st.sidebar.button("Use latest repository file"):
     st.session_state.use_repo_default = True
 else:
-    # If there is an uploaded file this run, keep preferring it
     if uploaded_apps is not None:
         st.session_state.use_repo_default = False
 
@@ -490,16 +498,22 @@ apps_df = read_any_table(DEFAULT_APPS_PATH, default_sep="\t") if st.session_stat
 if apps_df is None or apps_df.empty:
     st.stop()
 
+# --- NEW: always-on debug of headers so you can see what's in the file
+with st.sidebar.expander("Debug: file headers & mapping", expanded=False):
+    st.write("Raw headers:")
+    st.write(list(apps_df.columns))
+
+# Resolve columns (very robust), require only Program + Status
 resolved, missing = resolve_columns(apps_df)
 
-# Require only Program + Status; Term/Year optional
+with st.sidebar.expander("Debug: resolved mapping", expanded=False):
+    st.write(resolved)
+    st.write({"missing": missing})
+
 required = {"Program_Name", "Application_Status"}
 missing_required = [k for k in required if k not in resolved]
 
 if missing_required:
-    with st.sidebar.expander("Debug: columns in uploaded data", expanded=False):
-        st.write(list(apps_df.columns))
-        st.write({"resolved": resolved, "missing": missing})
     st.error(
         "Missing required columns in applications data: "
         + ", ".join(missing_required)
