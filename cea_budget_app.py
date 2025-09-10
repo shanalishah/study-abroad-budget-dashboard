@@ -33,6 +33,7 @@ def _candidate_dirs():
     raw_dirs = [
         Path("./data"),
         Path("."),
+        # Common Streamlit Cloud repo paths:
         Path("/mount/src/study-abroad-budget-dashboard"),
         Path("/mount/src/study-abroad-budget-dashboard/data"),
     ]
@@ -47,7 +48,7 @@ def _candidate_dirs():
             out.append(dp)
     return out
 
-# ---------- Robust timestamp parsing helpers ----------
+# ---------- Robust timestamp parsing helpers (handle ambiguity) ----------
 def _parse_time_tail(hms: str):
     """
     Parse a compact time string of length 3..6 into (hour, minute, second),
@@ -85,22 +86,24 @@ def _parse_time_tail(hms: str):
 
 def parse_filename_to_dt(stem: str) -> datetime | None:
     """
-    Parse stems of digits into a datetime by trying all plausible splits:
-      - Year: 4 or 2 digits (2-digit interpreted as 20YY)
-      - Month/Day: 1–2 digits each
-      - Time tail (H[H]M[M]S[S]): total length 3..6, components 1–2 digits each
-    Return the latest valid datetime among all candidates.
+    Parse stems like:
+      YYYY or YY, then M(1–2), D(1–2), and time tail H(1–2)M(1–2)S(1–2) with total length 3..6.
+    We try all plausible splits and return the first valid datetime.
+    Two-digit years are interpreted as 20YY.
+
+    Examples accepted:
+      2025910103853 -> 2025-9-10 03:85:3 (then validated; actually 03:85:03 would fail; real examples like 20259101229 -> 2025-9-10 1:2:9 are fine)
+      20259101229   -> 2025-9-10 1:2:9
+      259101229     -> 2025-9-10 1:2:9 (YY=25)
     """
     if not stem.isdigit():
         return None
-
     L = len(stem)
-    if L < 7:  # minimal is 2y + 1m + 1d + 3time
+    if L < 7:  # minimum viable length: 2y + 1m + 1d + 3 for time
         return None
 
-    candidates: list[datetime] = []
-
-    for ylen in (4, 2):  # try 4-digit year first, then 2-digit
+    # Try 4-digit year first, then 2-digit
+    for ylen in (4, 2):
         if L <= ylen + 1 + 1 + 2:  # need at least 3 digits for time tail
             continue
         try:
@@ -109,6 +112,7 @@ def parse_filename_to_dt(stem: str) -> datetime | None:
             continue
         year = year_raw if ylen == 4 else 2000 + year_raw
 
+        # Try month/day as 1 or 2 digits each
         for mlen in (1, 2):
             for dlen in (1, 2):
                 idx_time = ylen + mlen + dlen
@@ -121,12 +125,10 @@ def parse_filename_to_dt(stem: str) -> datetime | None:
                     month = int(stem[ylen:ylen+mlen])
                     day   = int(stem[ylen+mlen:ylen+mlen+dlen])
                     hh, mm, ss = _parse_time_tail(tail)
-                    dt = datetime(year, month, day, hh, mm, ss)
-                    candidates.append(dt)
+                    return datetime(year, month, day, hh, mm, ss)
                 except Exception:
                     continue
-
-    return max(candidates) if candidates else None
+    return None
 
 def find_cost_file() -> Path | None:
     """
@@ -147,50 +149,49 @@ def find_cost_file() -> Path | None:
 
 def find_latest_app_file() -> Path | None:
     """
-    Search likely locations for timestamped .txt files and pick the newest.
-    Uses the later of:
+    Look only in ./data for timestamped .txt files whose stem is all digits.
+    Pick the newest using the later of:
       - parsed datetime from filename (if any), and
       - file's modification time (mtime).
     """
+    data_dir = Path("./data")
+    if not data_dir.exists():
+        return None
+
     candidates: list[tuple[Path, datetime, datetime, datetime]] = []
-    for d in _candidate_dirs():
-        try:
-            for p in d.glob("*.txt"):
-                parsed = parse_filename_to_dt(p.stem)  # may be None
-                try:
-                    mtime = datetime.fromtimestamp(
-                        p.stat().st_mtime, tz=timezone.utc
-                    ).astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
-                except Exception:
-                    mtime = datetime.min
-                eff = max(parsed if parsed else datetime.min, mtime)
-                candidates.append((p, eff, parsed if parsed else datetime.min, mtime))
-        except Exception:
+    for p in data_dir.glob("*.txt"):
+        # ignore non-numeric stems like "requirements"
+        if not p.stem.isdigit():
             continue
+
+        parsed = parse_filename_to_dt(p.stem)
+        if parsed is None:
+            continue
+
+        try:
+            # mtime in ET, then make naive for comparison
+            mtime = datetime.fromtimestamp(
+                p.stat().st_mtime, tz=timezone.utc
+            ).astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        except Exception:
+            mtime = datetime.min
+
+        eff = max(parsed, mtime)
+        candidates.append((p, eff, parsed, mtime))
 
     if not candidates:
         return None
 
-    # Sort by effective time, then mtime
-    candidates.sort(key=lambda t: (t[1], t[3]))
+    candidates.sort(key=lambda t: (t[1], t[3]))  # effective time, then mtime
     return candidates[-1][0]
 
 def parse_timestamp_label(stem: str) -> str:
-    """Pretty label for sidebar source display (prefer parsed filename; fallback to mtime, show ET)."""
+    """Pretty label for sidebar source display (rendered in ET)."""
     dt = parse_filename_to_dt(stem)
-    if dt is not None:
-        et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
-        return et.strftime("%Y-%m-%d %H:%M:%S %Z")
-
-    for base in (Path("./data"), Path(".")):
-        p = base / f"{stem}.txt"
-        if p.exists():
-            try:
-                mt = datetime.fromtimestamp(p.stat().st_mtime, tz=ZoneInfo("America/New_York"))
-                return mt.strftime("%Y-%m-%d %H:%M:%S %Z")
-            except Exception:
-                break
-    return stem
+    if dt is None:
+        return stem
+    et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
+    return et.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 # ------------------------------ Encoding-robust readers ------------------------------
 def _read_csv_forgiving(path_or_buf, sep, dtype=str):
@@ -262,85 +263,33 @@ def coalesce_program_keys(name):
     s = re.sub(r"\s+", " ", s)
     return s
 
-# ------------------------------ Column resolver (extra-robust) ------------------------------
 def resolve_columns(df: pd.DataFrame):
     """
-    Resolve logical columns from flexible header spellings and tolerate hidden characters.
-    Returns (resolved, missing) where resolved maps each logical key to the ORIGINAL column name.
+    Resolve flexible column names for the required fields.
     """
-    def norm(s: str) -> str:
-        s = str(s)
-        s = s.replace("\ufeff", "").replace("\u200b", "").strip()  # BOM/ZWSP
-        s = s.lower()
-        s = re.sub(r"[\s_\-:/]+", "", s)   # collapse separators
-        s = re.sub(r"[^\w]", "", s)        # drop non-word chars
-        return s
-
-    # map normalized -> original
-    norm_to_orig = {}
-    for col in df.columns:
-        n = norm(col)
-        if n and n not in norm_to_orig:
-            norm_to_orig[n] = col
-
-    # helper: choose first that matches a predicate
-    def choose(pred):
-        for nval, orig in norm_to_orig.items():
-            if pred(nval):
-                return orig
-        return None
-
-    # 1) Program_Name
-    program_aliases = [
-        "programname","program","programtitle","name","program_name","programnm","programid","programidname",
-    ]
-    prog = None
-    for a in program_aliases:
-        if a in norm_to_orig:
-            prog = norm_to_orig[a]; break
-    if prog is None:
-        # Heuristic: has 'program' but not clearly other program-* fields
-        def prog_pred(n):
-            return ("program" in n) and not any(
-                bad in n for bad in ["programterm","programyear","itinerary","location","college","degree"]
-            ) and (n.endswith("name") or n == "program" or "title" in n)
-        prog = choose(prog_pred)
-        # last resort: any 'program*' that isn't term/year
-        if prog is None:
-            prog = choose(lambda n: "program" in n and not any(b in n for b in ["programterm","programyear"]))
-
-    # 2) Application_Status
-    status_aliases = [
-        "applicationstatus","status","appstatus","decision","application_status","admitstatus","currentstatus",
-    ]
-    stat = None
-    for a in status_aliases:
-        if a in norm_to_orig:
-            stat = norm_to_orig[a]; break
-    if stat is None:
-        stat = choose(lambda n: ("status" in n) or (n == "decision") or n.endswith("status"))
-
-    # 3) Program_Term (optional)
-    term_aliases = ["programterm","term","academicterm","programsemester","program_term","semester","session"]
-    term = None
-    for a in term_aliases:
-        if a in norm_to_orig:
-            term = norm_to_orig[a]; break
-
-    # 4) Program_Year (optional)
-    year_aliases = ["programyear","year","academicyear","programyr","program_year"]
-    year = None
-    for a in year_aliases:
-        if a in norm_to_orig:
-            year = norm_to_orig[a]; break
-
+    # Add common aliases just in case exports differ
+    expected = {
+        "Program_Name": ["Program_Name", "Program Name", "Program"],
+        "Application_Status": ["Application_Status", "Application Status", "Status"],
+        "Program_Term": ["Program_Term", "Program Term", "Term"],
+        "Program_Year": ["Program_Year", "Program Year", "Year"],
+    }
     resolved = {}
-    if prog:  resolved["Program_Name"] = prog
-    if stat:  resolved["Application_Status"] = stat
-    if term:  resolved["Program_Term"] = term
-    if year:  resolved["Program_Year"] = year
-
-    missing = [k for k in ["Program_Name","Application_Status","Program_Term","Program_Year"] if k not in resolved]
+    lower_map = {c.lower(): c for c in df.columns}
+    # try exact list; fall back to case-insensitive
+    for key, candidates in expected.items():
+        found = None
+        for c in candidates:
+            if c in df.columns:
+                found = c
+                break
+            lc = c.lower()
+            if lc in lower_map:
+                found = lower_map[lc]
+                break
+        if found:
+            resolved[key] = found
+    missing = [k for k in expected if k not in resolved]
     return resolved, missing
 
 def file_md5(path: Path) -> str:
@@ -471,22 +420,23 @@ uploaded_apps = st.sidebar.file_uploader("Upload export (optional)", type=["txt"
 if "use_repo_default" not in st.session_state:
     st.session_state.use_repo_default = True
 
-# If a file is uploaded this run, prefer it
 if uploaded_apps is not None:
     st.session_state.use_repo_default = False
 
 if st.sidebar.button("Use latest repository file"):
     st.session_state.use_repo_default = True
-else:
-    if uploaded_apps is not None:
-        st.session_state.use_repo_default = False
 
 DEFAULT_APPS_PATH = find_latest_app_file()
+
+# --- Quick debug so we always know what file got picked
+with st.sidebar.expander("Debug: chosen repo file", expanded=False):
+    st.write(str(DEFAULT_APPS_PATH) if DEFAULT_APPS_PATH else "(none found)")
+
 if st.session_state.use_repo_default:
     if DEFAULT_APPS_PATH:
         st.sidebar.success(f"Source: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
     else:
-        st.sidebar.warning("No timestamp-named applications file detected.")
+        st.sidebar.warning("No timestamp-named applications file detected in ./data (numeric stem).")
 else:
     st.sidebar.info("Source: uploaded file (session only)")
 
@@ -498,35 +448,21 @@ apps_df = read_any_table(DEFAULT_APPS_PATH, default_sep="\t") if st.session_stat
 if apps_df is None or apps_df.empty:
     st.stop()
 
-# --- NEW: always-on debug of headers so you can see what's in the file
-with st.sidebar.expander("Debug: file headers & mapping", expanded=False):
-    st.write("Raw headers:")
-    st.write(list(apps_df.columns))
+# Show the real headers briefly (collapsed) to help debugging if needed
+with st.expander("Debug: raw headers from loaded applications file", expanded=False):
+    try:
+        st.write(list(apps_df.columns))
+    except Exception:
+        st.write("Could not display columns.")
 
-# Resolve columns (very robust), require only Program + Status
 resolved, missing = resolve_columns(apps_df)
-
-with st.sidebar.expander("Debug: resolved mapping", expanded=False):
-    st.write(resolved)
-    st.write({"missing": missing})
-
-required = {"Program_Name", "Application_Status"}
-missing_required = [k for k in required if k not in resolved]
-
-if missing_required:
+if missing:
     st.error(
         "Missing required columns in applications data: "
-        + ", ".join(missing_required)
+        + ", ".join([m.replace('_', ' ') for m in missing])
         + ". I accept flexible names like 'Program'/'Status' too."
     )
     st.stop()
-
-optional_missing = [k for k in ["Program_Term","Program_Year"] if k not in resolved]
-if optional_missing:
-    st.warning(
-        "Optional columns not found: " + ", ".join(optional_missing)
-        + ". Continuing without term/year filters."
-    )
 
 # Normalize fields
 apps_df["__Program"] = apps_df[resolved["Program_Name"]].map(coalesce_program_keys)
