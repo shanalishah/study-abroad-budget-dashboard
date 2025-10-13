@@ -147,20 +147,56 @@ def find_cost_file() -> Path | None:
     candidates.sort(key=lambda p: (preference.get(p.suffix.lower(), 9), str(p)))
     return candidates[0]
 
+# def find_latest_app_file() -> Path | None:
+#     """
+#     Look only in ./data for timestamped .txt files whose stem is all digits.
+#     Pick the newest using the later of:
+#       - parsed datetime from filename (if any), and
+#       - file's modification time (mtime).
+#     """
+#     data_dir = Path("./data")
+#     if not data_dir.exists():
+#         return None
+
+#     candidates: list[tuple[Path, datetime, datetime, datetime]] = []
+#     for p in data_dir.glob("*.txt"):
+#         # ignore non-numeric stems like "requirements"
+#         if not p.stem.isdigit():
+#             continue
+
+#         parsed = parse_filename_to_dt(p.stem)
+#         if parsed is None:
+#             continue
+
+#         try:
+#             # mtime in ET, then make naive for comparison
+#             mtime = datetime.fromtimestamp(
+#                 p.stat().st_mtime, tz=timezone.utc
+#             ).astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
+#         except Exception:
+#             mtime = datetime.min
+
+#         eff = max(parsed, mtime)
+#         candidates.append((p, eff, parsed, mtime))
+
+#     if not candidates:
+#         return None
+
+#     candidates.sort(key=lambda t: (t[1], t[3]))  # effective time, then mtime
+#     return candidates[-1][0]
+
 def find_latest_app_file() -> Path | None:
     """
     Look only in ./data for timestamped .txt files whose stem is all digits.
-    Pick the newest using the later of:
-      - parsed datetime from filename (if any), and
-      - file's modification time (mtime).
+    Pick the newest based solely on the parsed datetime from filename,
+    using file modification time only as a tiebreaker.
     """
     data_dir = Path("./data")
     if not data_dir.exists():
         return None
 
-    candidates: list[tuple[Path, datetime, datetime, datetime]] = []
+    candidates: list[tuple[Path, datetime, datetime]] = []
     for p in data_dir.glob("*.txt"):
-        # ignore non-numeric stems like "requirements"
         if not p.stem.isdigit():
             continue
 
@@ -169,20 +205,20 @@ def find_latest_app_file() -> Path | None:
             continue
 
         try:
-            # mtime in ET, then make naive for comparison
+            # Modification time (Eastern Time) as fallback/tiebreaker
             mtime = datetime.fromtimestamp(
                 p.stat().st_mtime, tz=timezone.utc
             ).astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
         except Exception:
             mtime = datetime.min
 
-        eff = max(parsed, mtime)
-        candidates.append((p, eff, parsed, mtime))
+        candidates.append((p, parsed, mtime))
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda t: (t[1], t[3]))  # effective time, then mtime
+    # Sort by parsed timestamp first, then modification time
+    candidates.sort(key=lambda t: (t[1], t[2]))
     return candidates[-1][0]
 
 def parse_timestamp_label(stem: str) -> str:
