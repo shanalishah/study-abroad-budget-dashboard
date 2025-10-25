@@ -1,2 +1,3 @@
 # study-abroad-budget-dashboard
-https://ceabudgetdashboard.streamlit.app/
+SOP document is present in the root folder.
+You can check the tool here: https://ceabudgetdashboard.streamlit.app/
