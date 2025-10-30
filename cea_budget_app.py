@@ -76,7 +76,8 @@ def file_md5(path: Path) -> str:
 
 # filenames like: spring_2026_budget-2025-10-30-10_30_00.csv
 def parse_new_budget_name(stem: str) -> datetime | None:
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})_(\d{2})_(\d{2})$", stem)
+    # m = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})_(\d{2})_(\d{2})$", stem)
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})-(\d{1,2})_(\d{1,2})_(\d{1,2})$", stem)
     if not m:
         return None
     y, mo, d, hh, mm, ss = map(int, m.groups())
