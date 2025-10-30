@@ -452,7 +452,7 @@ filtered = dedup_students_by_priority_then_cost(filtered, COSTS)
 # -------------------------------------------------------------------
 # COHORTS
 # -------------------------------------------------------------------
-CONFIRMED_STATUSES = ["Committed", "Permission to Study Abroad: Granted", "Provisional Permission"]
+CONFIRMED_STATUSES = ["Committed", "Permission to Study Abroad: Granted", "Provisional Permission", "Accepted"]
 confirmed = filtered[filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
 pending   = filtered[~filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
 confirmed["__Group"] = "Approved"
