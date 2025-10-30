@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 try:
-    import yaml  # optional; only needed if you use YAML costs
+    import yaml  # optional
 except Exception:
     yaml = None
 
@@ -19,20 +19,38 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.units import inch
 
-# -------------------------------------------------------------------
+# =========================================================
 # STREAMLIT CONFIG
-# -------------------------------------------------------------------
+# =========================================================
 st.set_page_config(page_title="Education Abroad Budget Dashboard", layout="wide")
 st.title("Education Abroad Budget Dashboard")
 
-# -------------------------------------------------------------------
+# =========================================================
 # CONSTANTS
-# -------------------------------------------------------------------
+# =========================================================
 SUPPORTED_COST_EXTS = [".tsv", ".txt", ".csv", ".yaml", ".yml", ".json"]
 
-# -------------------------------------------------------------------
-# UTILS
-# -------------------------------------------------------------------
+# statuses we consider "approved" for the dashboard
+APPROVED_STATUSES = [
+    "Committed",
+    "Accepted",
+    "Permission to Study Abroad: Granted",
+    "Provisional Permission",
+]
+
+# and their priority for de-dup
+STATUS_PRIORITY = {
+    "Committed": 4,
+    "Accepted": 3,
+    "Permission to Study Abroad: Granted": 2,
+    "Provisional Permission": 1,
+}
+def status_rank(s: str) -> int:
+    return STATUS_PRIORITY.get(str(s), 0)
+
+# =========================================================
+# PATH / FILE HELPERS
+# =========================================================
 def _candidate_dirs():
     raw_dirs = [
         Path("./data"),
@@ -56,32 +74,18 @@ def file_md5(path: Path) -> str:
         return ""
     return hashlib.md5(path.read_bytes()).hexdigest()
 
-# -------------------------------------------------------------------
-# FILENAME PARSING FOR NEW PATTERN
-# e.g. spring_2026_budget-2025-10-30-10_30_00.csv
-# -------------------------------------------------------------------
+# filenames like: spring_2026_budget-2025-10-30-10_30_00.csv
 def parse_new_budget_name(stem: str) -> datetime | None:
-    """
-    Parse filenames like:
-      spring_2026_budget-2025-10-30-10_30_00
-      fall_2025_budget-2025-08-15-09_05_30
-    We look for the tail: YYYY-MM-DD-HH_MM_SS
-    """
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})_(\d{2})_(\d{2})$", stem)
     if not m:
         return None
-    year, month, day, hh, mm, ss = map(int, m.groups())
+    y, mo, d, hh, mm, ss = map(int, m.groups())
     try:
-        return datetime(year, month, day, hh, mm, ss)
+        return datetime(y, mo, d, hh, mm, ss)
     except ValueError:
         return None
 
 def find_latest_app_file() -> Path | None:
-    """
-    Look only in ./data for CSV files matching the new pattern:
-      something-like-this-YYYY-MM-DD-HH_MM_SS.csv
-    Pick the newest based on parsed datetime, mtime as tiebreaker.
-    """
     data_dir = Path("./data")
     if not data_dir.exists():
         return None
@@ -112,15 +116,10 @@ def parse_timestamp_label(stem: str) -> str:
     et = dt.replace(tzinfo=ZoneInfo("America/New_York"))
     return et.strftime("%Y-%m-%d %H:%M:%S %Z")
 
-# -------------------------------------------------------------------
-# ROBUST READER (CSV + TXT)
-# -------------------------------------------------------------------
+# =========================================================
+# GENERIC READERS
+# =========================================================
 def _read_csv_forgiving(path_or_buf, sep=",", dtype=str):
-    """
-    Forgiving CSV/TSV reader.
-    - tries multiple encodings
-    - lets you choose separator (',' for CSV, '\\t' for TXT/TSV)
-    """
     encodings = ["utf-8", "utf-8-sig", "cp1252"]
     last_err = None
     for enc in encodings:
@@ -146,9 +145,26 @@ def _clean_col(c: str) -> str:
         .strip()
     )
 
-# -------------------------------------------------------------------
-# COSTS LOADER
-# -------------------------------------------------------------------
+def read_any_apps_file(file_obj_or_path):
+    """Read CSV or TXT/TSV and normalize headers/values."""
+    if file_obj_or_path is None:
+        return None
+
+    name = getattr(file_obj_or_path, "name", str(file_obj_or_path))
+    if name and name.lower().endswith((".txt", ".tsv")):
+        df = _read_csv_forgiving(file_obj_or_path, sep="\t", dtype=str)
+    else:
+        df = _read_csv_forgiving(file_obj_or_path, sep=",", dtype=str)
+
+    df.columns = [_clean_col(c) for c in df.columns]
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].astype(str).str.replace("\u00a0", " ").str.strip()
+    return df
+
+# =========================================================
+# COSTS
+# =========================================================
 def _read_text(path: Path) -> str:
     for enc in ["utf-8", "utf-8-sig", "cp1252"]:
         try:
@@ -160,7 +176,7 @@ def _read_text(path: Path) -> str:
 @st.cache_data(show_spinner=False, ttl=0)
 def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
     if not path or not path.exists():
-        st.warning("No cost file found. Expected one of: ProgramCost.tsv/.txt/.csv/.yaml/.yml/.json.")
+        st.warning("No cost file found. Expected ProgramCost.tsv/.txt/.csv/.yaml/.yml/.json.")
         return pd.DataFrame(columns=["__Program", "__Cost"])
 
     ext = path.suffix.lower()
@@ -171,7 +187,7 @@ def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
         df = _read_csv_forgiving(path, sep=",", dtype=str)
     elif ext in [".yaml", ".yml"]:
         if yaml is None:
-            st.error("YAML support requires the 'pyyaml' package. Add it or use CSV/TSV.")
+            st.error("YAML support requires pyyaml.")
             return pd.DataFrame(columns=["__Program", "__Cost"])
         txt = _read_text(path)
         data = yaml.safe_load(txt) if txt else []
@@ -190,12 +206,12 @@ def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
     cost_col = next((c for c in ["$ Cost/Student", "Cost", "cost", "Cost per Student", "Cost_Student"] if c in df.columns), None)
 
     if name_col is None or cost_col is None:
-        st.warning("Cost file must include columns for Program Name and Cost (e.g., 'Program Name', '$ Cost/Student').")
+        st.warning("Cost file must have Program Name + Cost column.")
         return pd.DataFrame(columns=["__Program", "__Cost"])
 
     df = df[~df[name_col].isna() & (df[name_col].astype(str).str.strip() != "")].copy()
-    df["__Program"] = df[name_col].map(coalesce_program_keys)
-    df["__Cost"]    = df[cost_col].map(normalize_currency)
+    df["__Program"] = df[name_col].map(lambda x: coalesce_program_keys(x))
+    df["__Cost"] = df[cost_col].map(normalize_currency)
     df = df[~df["__Program"].isna() & (df["__Program"].astype(str).str.strip() != "")]
     return df[["__Program", "__Cost"]]
 
@@ -212,20 +228,25 @@ def find_cost_file() -> Path | None:
     candidates.sort(key=lambda p: (preference.get(p.suffix.lower(), 9), str(p)))
     return candidates[0]
 
-# -------------------------------------------------------------------
+# =========================================================
 # NORMALIZATION HELPERS
-# -------------------------------------------------------------------
+# =========================================================
 def normalize_currency(s):
-    if pd.isna(s): return pd.NA
+    if pd.isna(s):
+        return pd.NA
     s = str(s).replace(",", "").replace("$", "").strip()
-    if s == "" or s.lower() == "na": return pd.NA
-    try: return float(s)
-    except Exception: return pd.NA
+    if s == "" or s.lower() == "na":
+        return pd.NA
+    try:
+        return float(s)
+    except Exception:
+        return pd.NA
 
 def coalesce_program_keys(name):
-    if pd.isna(name): return None
+    if pd.isna(name):
+        return None
     s = str(name).strip()
-    s = re.sub("[\u2013\u2014]", "-", s)  # en/em dash -> hyphen
+    s = re.sub("[\u2013\u2014]", "-", s)
     s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     s = re.sub(r"\s+", " ", s)
     return s
@@ -254,22 +275,15 @@ def resolve_columns(df: pd.DataFrame):
     missing = [k for k in expected if k not in resolved]
     return resolved, missing
 
-# -------------------------------------------------------------------
-# STUDENT KEY / DEDUP
-# -------------------------------------------------------------------
-STATUS_PRIORITY = {
-    "Committed": 3,
-    "Permission to Study Abroad: Granted": 2,
-    "Provisional Permission": 1,
-}
-def status_rank(s): return STATUS_PRIORITY.get(s, 0)
-
+# =========================================================
+# DEDUP BY STUDENT (priority + cost)
+# =========================================================
 def build_student_key(df: pd.DataFrame) -> pd.Series:
     candidates = [
         "UR ID", "UR_ID", "Student_ID", "Student Id", "ID",
         "User ID", "UserID", "User Id",
         "Email", "Email_Address", "Email Address", "Student Email", "User Email",
-        "NetID", "Net Id"
+        "NetID", "Net Id",
     ]
     found = next((c for c in candidates if c in df.columns), None)
     if found:
@@ -283,6 +297,7 @@ def build_student_key(df: pd.DataFrame) -> pd.Series:
             + "||"
             + df[ln[0]].astype(str).str.strip().str.lower()
         )
+
     return (
         df.get("Email", pd.Series([""] * len(df))).astype(str).str.lower()
         + "||"
@@ -292,41 +307,61 @@ def build_student_key(df: pd.DataFrame) -> pd.Series:
 def dedup_students_by_priority_then_cost(df_apps: pd.DataFrame, df_costs: pd.DataFrame) -> pd.DataFrame:
     if df_apps.empty:
         return df_apps
-    costs = df_costs.rename(columns={"__Program": "__Program_cost_key", "__Cost": "__CostValue"}).copy()
+
+    costs = df_costs.rename(
+        columns={"__Program": "__Program_cost_key", "__Cost": "__CostValue"}
+    ).copy()
+
     tmp = df_apps.copy()
     tmp["__StudentKey"] = build_student_key(tmp)
     tmp["__Rank"] = tmp["__Status"].map(status_rank)
+
     tmp = tmp.merge(
         costs[["__Program_cost_key", "__CostValue"]],
-        left_on="__Program", right_on="__Program_cost_key", how="left"
+        left_on="__Program",
+        right_on="__Program_cost_key",
+        how="left",
     )
     tmp["__CostValue"] = tmp["__CostValue"].fillna(0.0)
+
+    # Highest rank first, then higher cost
     tmp = tmp.sort_values(["__Rank", "__CostValue"], ascending=[False, False], kind="stable")
+
+    # keep best per student
     tmp = tmp.drop_duplicates(subset="__StudentKey", keep="first")
+
     return tmp.drop(columns=["__StudentKey", "__Rank", "__Program_cost_key", "__CostValue"], errors="ignore")
 
-# -------------------------------------------------------------------
+# =========================================================
 # AGGREGATION
-# -------------------------------------------------------------------
+# =========================================================
 def aggregate_by_program_status(df, costs):
     if df.empty:
-        return pd.DataFrame(columns=[
-            "Program", "Status", "Student Count", "Cost per Student (USD)", "Budget (USD)"
-        ])
+        return pd.DataFrame(
+            columns=[
+                "Program",
+                "Status",
+                "Student Count",
+                "Cost per Student (USD)",
+                "Budget (USD)",
+            ]
+        )
 
     counts = (
         df.groupby(["__Program", "__Status"], dropna=False)
-          .size().reset_index(name="Student Count")
+        .size()
+        .reset_index(name="Student Count")
     )
-    merged = counts.merge(costs, left_on="__Program", right_on="__Program", how="left")
+    merged = counts.merge(costs, on="__Program", how="left")
 
     merged["Program"] = merged["__Program"]
-    merged["Status"]  = merged["__Status"]
-
+    merged["Status"] = merged["__Status"]
     merged["Cost per Student (USD)"] = merged["__Cost"]
     merged["Budget (USD)"] = merged["Student Count"] * merged["__Cost"]
 
-    return merged[["Program", "Status", "Student Count", "Cost per Student (USD)", "Budget (USD)"]]
+    return merged[
+        ["Program", "Status", "Student Count", "Cost per Student (USD)", "Budget (USD)"]
+    ]
 
 def kpi_row(df):
     total_students = int(df["Student Count"].sum()) if not df.empty else 0
@@ -336,9 +371,9 @@ def kpi_row(df):
 def fmt_money(x):
     return "-" if pd.isna(x) else f"${x:,.0f}"
 
-# -------------------------------------------------------------------
+# =========================================================
 # SIDEBAR: FILE PICKER
-# -------------------------------------------------------------------
+# =========================================================
 st.sidebar.header("Applications Data")
 uploaded_apps = st.sidebar.file_uploader("Upload file (CSV or TXT)", type=["csv", "txt", "tsv"])
 
@@ -356,50 +391,33 @@ if st.session_state.use_repo_default:
     if DEFAULT_APPS_PATH:
         st.sidebar.success(f"Source: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
     else:
-        st.sidebar.warning("No application file detected in ./data (matching *-YYYY-MM-DD-HH_MM_SS.csv).")
+        st.sidebar.warning("No application file detected in ./data.")
 else:
     st.sidebar.info("Source: uploaded file (session only)")
 
-# -------------------------------------------------------------------
+# =========================================================
 # LOAD COSTS
-# -------------------------------------------------------------------
+# =========================================================
 COST_FILE_PATH = find_cost_file()
 COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
 
-# -------------------------------------------------------------------
-# LOAD APPLICATIONS (CSV or TXT)
-# -------------------------------------------------------------------
-def read_any_file(file_obj_or_path):
-    """Read either CSV or TXT automatically."""
-    if file_obj_or_path is None:
-        return None
-
-    name = getattr(file_obj_or_path, "name", str(file_obj_or_path))
-    if name and name.lower().endswith((".txt", ".tsv")):
-        df = _read_csv_forgiving(file_obj_or_path, sep="\t", dtype=str)
-    else:
-        df = _read_csv_forgiving(file_obj_or_path, sep=",", dtype=str)
-
-    df.columns = [_clean_col(c) for c in df.columns]
-    for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype(str).str.replace("\u00a0", " ").str.strip()
-    return df
-
+# =========================================================
+# LOAD APPLICATIONS
+# =========================================================
 apps_df = (
-    read_any_file(DEFAULT_APPS_PATH)
+    read_any_apps_file(DEFAULT_APPS_PATH)
     if st.session_state.use_repo_default
-    else read_any_file(uploaded_apps)
+    else read_any_apps_file(uploaded_apps)
 )
 if apps_df is None or apps_df.empty:
     st.stop()
 
-# -------------------------------------------------------------------
-# RESOLVE COLUMNS (with fallback)
-# -------------------------------------------------------------------
+# =========================================================
+# RESOLVE REQUIRED COLUMNS
+# =========================================================
 resolved, missing = resolve_columns(apps_df)
-
 if missing:
+    # extra fallback based on lower-cased headers
     colmap = {c.lower().replace("\u00a0", " ").strip(): c for c in apps_df.columns}
     if "program name" in colmap and "Program_Name" not in resolved:
         resolved["Program_Name"] = colmap["program name"]
@@ -421,17 +439,17 @@ if missing:
     st.write("DEBUG headers:", list(apps_df.columns))
     st.stop()
 
-# -------------------------------------------------------------------
-# NORMALIZE
-# -------------------------------------------------------------------
+# =========================================================
+# NORMALIZE KEY COLS
+# =========================================================
 apps_df["__Program"] = apps_df[resolved["Program_Name"]].map(coalesce_program_keys)
-apps_df["__Status"]  = apps_df[resolved["Application_Status"]].fillna("")
-apps_df["__Term"]    = apps_df[resolved.get("Program_Term", "")] if "Program_Term" in resolved else ""
-apps_df["__Year"]    = apps_df[resolved.get("Program_Year", "")] if "Program_Year" in resolved else ""
+apps_df["__Status"] = apps_df[resolved["Application_Status"]].fillna("")
+apps_df["__Term"] = apps_df[resolved.get("Program_Term", "")] if "Program_Term" in resolved else ""
+apps_df["__Year"] = apps_df[resolved.get("Program_Year", "")] if "Program_Year" in resolved else ""
 
-# -------------------------------------------------------------------
+# =========================================================
 # FILTERS
-# -------------------------------------------------------------------
+# =========================================================
 st.sidebar.header("Filters")
 term_opts = ["(all)"] + sorted([t for t in apps_df["__Term"].dropna().unique() if str(t).strip()])
 year_opts = ["(all)"] + sorted([y for y in apps_df["__Year"].dropna().unique() if str(y).strip()])
@@ -444,25 +462,24 @@ if term != "(all)":
 if year != "(all)":
     filtered = filtered[filtered["__Year"] == year]
 
-# -------------------------------------------------------------------
-# DEDUP
-# -------------------------------------------------------------------
+# =========================================================
+# DEDUP (this is where priority kicks in)
+# =========================================================
 filtered = dedup_students_by_priority_then_cost(filtered, COSTS)
 
-# -------------------------------------------------------------------
-# COHORTS
-# -------------------------------------------------------------------
-CONFIRMED_STATUSES = ["Committed", "Permission to Study Abroad: Granted", "Provisional Permission", "Accepted"]
-confirmed = filtered[filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
-pending   = filtered[~filtered["__Status"].isin(CONFIRMED_STATUSES)].copy()
+# =========================================================
+# SPLIT COHORTS
+# =========================================================
+confirmed = filtered[filtered["__Status"].isin(APPROVED_STATUSES)].copy()
+pending = filtered[~filtered["__Status"].isin(APPROVED_STATUSES)].copy()
 confirmed["__Group"] = "Approved"
-pending["__Group"]   = "Pending"
+pending["__Group"] = "Pending"
 
-# -------------------------------------------------------------------
-# AGGREGATION
-# -------------------------------------------------------------------
+# =========================================================
+# AGGREGATION + KPIs
+# =========================================================
 agg_confirmed = aggregate_by_program_status(confirmed, COSTS)
-agg_pending   = aggregate_by_program_status(pending,   COSTS)
+agg_pending = aggregate_by_program_status(pending, COSTS)
 
 conf_students, conf_budget = kpi_row(agg_confirmed)
 pend_students, pend_budget = kpi_row(agg_pending)
@@ -470,20 +487,23 @@ pend_students, pend_budget = kpi_row(agg_pending)
 total_students = conf_students + pend_students
 total_budget = (0 if pd.isna(conf_budget) else conf_budget) + (0 if pd.isna(pend_budget) else pend_budget)
 
-# -------------------------------------------------------------------
-# KPIs
-# -------------------------------------------------------------------
 k1, k2, k3, k4, k5, k6 = st.columns(6)
-with k1: st.metric("Approved Students", f"{conf_students:,}")
-with k2: st.metric("Approved Budget Exposure", fmt_money(conf_budget))
-with k3: st.metric("Pending Students", f"{pend_students:,}")
-with k4: st.metric("Pending Budget Exposure", fmt_money(pend_budget))
-with k5: st.metric("Total Students", f"{total_students:,}")
-with k6: st.metric("Total Budget Exposure", fmt_money(total_budget))
+with k1:
+    st.metric("Approved Students", f"{conf_students:,}")
+with k2:
+    st.metric("Approved Budget Exposure", fmt_money(conf_budget))
+with k3:
+    st.metric("Pending Students", f"{pend_students:,}")
+with k4:
+    st.metric("Pending Budget Exposure", fmt_money(pend_budget))
+with k5:
+    st.metric("Total Students", f"{total_students:,}")
+with k6:
+    st.metric("Total Budget Exposure", fmt_money(total_budget))
 
-# -------------------------------------------------------------------
+# =========================================================
 # TABLES
-# -------------------------------------------------------------------
+# =========================================================
 st.subheader("Approved - Student Budget")
 if agg_confirmed.empty:
     st.write("No records for the current filters.")
@@ -496,9 +516,9 @@ if agg_pending.empty:
 else:
     st.dataframe(agg_pending.sort_values(["Program", "Status"]), use_container_width=True)
 
-# -------------------------------------------------------------------
+# =========================================================
 # STUDENT EXPORTS
-# -------------------------------------------------------------------
+# =========================================================
 student_cols_preferred = []
 for label in [
     "UR ID", "UR_ID", "Student_ID", "Student Id", "ID", "User ID",
@@ -522,7 +542,7 @@ def build_student_export(df):
     return export
 
 confirmed_students_export = build_student_export(confirmed)
-pending_students_export   = build_student_export(pending)
+pending_students_export = build_student_export(pending)
 
 combined_students_export = pd.DataFrame()
 if not confirmed_students_export.empty:
@@ -573,9 +593,9 @@ with c3:
             mime="text/csv",
         )
 
-# -------------------------------------------------------------------
+# =========================================================
 # SUMMARY
-# -------------------------------------------------------------------
+# =========================================================
 def totals_by(df):
     if df.empty:
         return pd.DataFrame(columns=["Status", "Students", "Budget"])
@@ -595,9 +615,9 @@ summary = pd.concat(
 st.subheader("Budget Summary by Status")
 st.dataframe(summary, use_container_width=True)
 
-# -------------------------------------------------------------------
+# =========================================================
 # DIAGNOSTICS
-# -------------------------------------------------------------------
+# =========================================================
 all_agg = pd.concat([agg_confirmed, agg_pending], ignore_index=True)
 missing_cost = sorted(
     all_agg[all_agg["Cost per Student (USD)"].isna()]["Program"]
@@ -609,9 +629,9 @@ if missing_cost:
     with st.expander("Programs Missing Cost Mapping"):
         st.write(missing_cost)
 
-# -------------------------------------------------------------------
+# =========================================================
 # REPORTS
-# -------------------------------------------------------------------
+# =========================================================
 def build_docx_report() -> bytes:
     doc = Document()
     doc.add_heading("Education Abroad Budget Snapshot", level=1)
@@ -717,9 +737,9 @@ def build_pdf_report() -> bytes:
     c.save()
     return bio.getvalue()
 
-# -------------------------------------------------------------------
+# =========================================================
 # EXPORTS
-# -------------------------------------------------------------------
+# =========================================================
 st.subheader("Exports")
 colA, colB, colC = st.columns(3)
 
@@ -745,7 +765,7 @@ with colC:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         if not agg_confirmed.empty:
-            agg_confirmed.to_excel(writer, index=False, sheet_name="Confirmed_Student_Budget")
+            agg_confirmed.to_excel(writer, index=False, sheet_name="Approved_Student_Budget")
         if not agg_pending.empty:
             agg_pending.to_excel(writer, index=False, sheet_name="Pending_Student_Budget")
         if not summary.empty:
