@@ -344,11 +344,50 @@ def kpi_row(df):
 def fmt_money(x):
     return "-" if pd.isna(x) else f"${x:,.0f}"
 
-# -------------------------------------------------------------------
-# SIDEBAR: FILE PICKER
-# -------------------------------------------------------------------
+# # -------------------------------------------------------------------
+# # SIDEBAR: FILE PICKER
+# # -------------------------------------------------------------------
+# st.sidebar.header("Applications Data")
+# uploaded_apps = st.sidebar.file_uploader("Upload CSV (optional)", type=["csv"])
+
+# if "use_repo_default" not in st.session_state:
+#     st.session_state.use_repo_default = True
+
+# if uploaded_apps is not None:
+#     st.session_state.use_repo_default = False
+
+# if st.sidebar.button("Use latest repository file"):
+#     st.session_state.use_repo_default = True
+
+# DEFAULT_APPS_PATH = find_latest_app_file()
+# if st.session_state.use_repo_default:
+#     if DEFAULT_APPS_PATH:
+#         st.sidebar.success(f"Source: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
+#     else:
+#         st.sidebar.warning("No CSV detected in ./data matching pattern '*-YYYY-MM-DD-HH_MM_SS.csv'.")
+# else:
+#     st.sidebar.info("Source: uploaded CSV (session only)")
+
+# # -------------------------------------------------------------------
+# # LOAD COSTS
+# # -------------------------------------------------------------------
+# COST_FILE_PATH = find_cost_file()
+# COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
+
+# # -------------------------------------------------------------------
+# # LOAD APPLICATIONS
+# # -------------------------------------------------------------------
+# apps_df = (
+#     read_apps_csv(DEFAULT_APPS_PATH)
+#     if st.session_state.use_repo_default
+#     else read_apps_csv(uploaded_apps)
+# )
+# if apps_df is None or apps_df.empty:
+#     st.stop()
+
+# ---------------------- Sidebar: File Picker ----------------------
 st.sidebar.header("Applications Data")
-uploaded_apps = st.sidebar.file_uploader("Upload CSV (optional)", type=["csv"])
+uploaded_apps = st.sidebar.file_uploader("Upload file (CSV or TXT)", type=["csv", "txt", "tsv"])
 
 if "use_repo_default" not in st.session_state:
     st.session_state.use_repo_default = True
@@ -364,23 +403,34 @@ if st.session_state.use_repo_default:
     if DEFAULT_APPS_PATH:
         st.sidebar.success(f"Source: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
     else:
-        st.sidebar.warning("No CSV detected in ./data matching pattern '*-YYYY-MM-DD-HH_MM_SS.csv'.")
+        st.sidebar.warning("No application file detected in ./data (numeric/timestamped stem).")
 else:
-    st.sidebar.info("Source: uploaded CSV (session only)")
+    st.sidebar.info("Source: uploaded file (session only)")
 
-# -------------------------------------------------------------------
-# LOAD COSTS
-# -------------------------------------------------------------------
-COST_FILE_PATH = find_cost_file()
-COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
+# ---------------------- Load Applications ----------------------
+def read_any_file(file_obj_or_path):
+    """Read either CSV or TXT automatically."""
+    if file_obj_or_path is None:
+        return None
 
-# -------------------------------------------------------------------
-# LOAD APPLICATIONS
-# -------------------------------------------------------------------
+    name = getattr(file_obj_or_path, "name", str(file_obj_or_path))
+    if name and name.lower().endswith((".txt", ".tsv")):
+        df = _read_csv_forgiving(file_obj_or_path, sep="\t", dtype=str)
+    else:
+        df = _read_csv_forgiving(file_obj_or_path, sep=",", dtype=str)
+
+    # Clean headers and values
+    df.columns = [_clean_col(c) for c in df.columns]
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].astype(str).str.replace("\u00a0", " ").str.strip()
+    return df
+
+# Read depending on user choice
 apps_df = (
-    read_apps_csv(DEFAULT_APPS_PATH)
+    read_any_file(DEFAULT_APPS_PATH)
     if st.session_state.use_repo_default
-    else read_apps_csv(uploaded_apps)
+    else read_any_file(uploaded_apps)
 )
 if apps_df is None or apps_df.empty:
     st.stop()
