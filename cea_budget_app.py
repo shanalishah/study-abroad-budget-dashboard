@@ -59,7 +59,6 @@ def file_md5(path: Path) -> str:
 # -------------------------------------------------------------------
 # FILENAME PARSING FOR NEW PATTERN
 # e.g. spring_2026_budget-2025-10-30-10_30_00.csv
-# we want to extract: 2025-10-30 10:30:00
 # -------------------------------------------------------------------
 def parse_new_budget_name(stem: str) -> datetime | None:
     """
@@ -68,7 +67,6 @@ def parse_new_budget_name(stem: str) -> datetime | None:
       fall_2025_budget-2025-08-15-09_05_30
     We look for the tail: YYYY-MM-DD-HH_MM_SS
     """
-    # find last '-' part
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})_(\d{2})_(\d{2})$", stem)
     if not m:
         return None
@@ -82,8 +80,7 @@ def find_latest_app_file() -> Path | None:
     """
     Look only in ./data for CSV files matching the new pattern:
       something-like-this-YYYY-MM-DD-HH_MM_SS.csv
-    Pick the newest based on the parsed datetime from filename,
-    using file modification time as a tiebreaker.
+    Pick the newest based on parsed datetime, mtime as tiebreaker.
     """
     data_dir = Path("./data")
     if not data_dir.exists():
@@ -116,15 +113,21 @@ def parse_timestamp_label(stem: str) -> str:
     return et.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 # -------------------------------------------------------------------
-# ROBUST READER (CSV ONLY NOW)
+# ROBUST READER (CSV + TXT)
 # -------------------------------------------------------------------
-def _read_csv_forgiving(path_or_buf, dtype=str):
+def _read_csv_forgiving(path_or_buf, sep=",", dtype=str):
+    """
+    Forgiving CSV/TSV reader.
+    - tries multiple encodings
+    - lets you choose separator (',' for CSV, '\\t' for TXT/TSV)
+    """
     encodings = ["utf-8", "utf-8-sig", "cp1252"]
     last_err = None
     for enc in encodings:
         try:
             return pd.read_csv(
                 path_or_buf,
+                sep=sep,
                 dtype=dtype,
                 engine="python",
                 encoding=enc,
@@ -143,18 +146,8 @@ def _clean_col(c: str) -> str:
         .strip()
     )
 
-def read_apps_csv(file_or_path):
-    if file_or_path is None:
-        return None
-    df = _read_csv_forgiving(file_or_path, dtype=str)
-    df.columns = [_clean_col(c) for c in df.columns]
-    for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype(str).str.replace("\u00a0", " ").str.strip()
-    return df
-
 # -------------------------------------------------------------------
-# COSTS LOADER (unchanged)
+# COSTS LOADER
 # -------------------------------------------------------------------
 def _read_text(path: Path) -> str:
     for enc in ["utf-8", "utf-8-sig", "cp1252"]:
@@ -173,10 +166,9 @@ def load_costs_from_repo(path: Path, content_hash: str) -> pd.DataFrame:
     ext = path.suffix.lower()
 
     if ext in [".tsv", ".txt"]:
-        df = _read_csv_forgiving(path, dtype=str)
-        df = pd.read_csv(path, sep="\t", dtype=str)
+        df = _read_csv_forgiving(path, sep="\t", dtype=str)
     elif ext == ".csv":
-        df = _read_csv_forgiving(path, dtype=str)
+        df = _read_csv_forgiving(path, sep=",", dtype=str)
     elif ext in [".yaml", ".yml"]:
         if yaml is None:
             st.error("YAML support requires the 'pyyaml' package. Add it or use CSV/TSV.")
@@ -344,48 +336,9 @@ def kpi_row(df):
 def fmt_money(x):
     return "-" if pd.isna(x) else f"${x:,.0f}"
 
-# # -------------------------------------------------------------------
-# # SIDEBAR: FILE PICKER
-# # -------------------------------------------------------------------
-# st.sidebar.header("Applications Data")
-# uploaded_apps = st.sidebar.file_uploader("Upload CSV (optional)", type=["csv"])
-
-# if "use_repo_default" not in st.session_state:
-#     st.session_state.use_repo_default = True
-
-# if uploaded_apps is not None:
-#     st.session_state.use_repo_default = False
-
-# if st.sidebar.button("Use latest repository file"):
-#     st.session_state.use_repo_default = True
-
-# DEFAULT_APPS_PATH = find_latest_app_file()
-# if st.session_state.use_repo_default:
-#     if DEFAULT_APPS_PATH:
-#         st.sidebar.success(f"Source: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
-#     else:
-#         st.sidebar.warning("No CSV detected in ./data matching pattern '*-YYYY-MM-DD-HH_MM_SS.csv'.")
-# else:
-#     st.sidebar.info("Source: uploaded CSV (session only)")
-
-# # -------------------------------------------------------------------
-# # LOAD COSTS
-# # -------------------------------------------------------------------
-# COST_FILE_PATH = find_cost_file()
-# COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
-
-# # -------------------------------------------------------------------
-# # LOAD APPLICATIONS
-# # -------------------------------------------------------------------
-# apps_df = (
-#     read_apps_csv(DEFAULT_APPS_PATH)
-#     if st.session_state.use_repo_default
-#     else read_apps_csv(uploaded_apps)
-# )
-# if apps_df is None or apps_df.empty:
-#     st.stop()
-
-# ---------------------- Sidebar: File Picker ----------------------
+# -------------------------------------------------------------------
+# SIDEBAR: FILE PICKER
+# -------------------------------------------------------------------
 st.sidebar.header("Applications Data")
 uploaded_apps = st.sidebar.file_uploader("Upload file (CSV or TXT)", type=["csv", "txt", "tsv"])
 
@@ -403,11 +356,19 @@ if st.session_state.use_repo_default:
     if DEFAULT_APPS_PATH:
         st.sidebar.success(f"Source: {DEFAULT_APPS_PATH.name} ({parse_timestamp_label(DEFAULT_APPS_PATH.stem)})")
     else:
-        st.sidebar.warning("No application file detected in ./data (numeric/timestamped stem).")
+        st.sidebar.warning("No application file detected in ./data (matching *-YYYY-MM-DD-HH_MM_SS.csv).")
 else:
     st.sidebar.info("Source: uploaded file (session only)")
 
-# ---------------------- Load Applications ----------------------
+# -------------------------------------------------------------------
+# LOAD COSTS
+# -------------------------------------------------------------------
+COST_FILE_PATH = find_cost_file()
+COSTS = load_costs_from_repo(COST_FILE_PATH, file_md5(COST_FILE_PATH))
+
+# -------------------------------------------------------------------
+# LOAD APPLICATIONS (CSV or TXT)
+# -------------------------------------------------------------------
 def read_any_file(file_obj_or_path):
     """Read either CSV or TXT automatically."""
     if file_obj_or_path is None:
@@ -419,14 +380,12 @@ def read_any_file(file_obj_or_path):
     else:
         df = _read_csv_forgiving(file_obj_or_path, sep=",", dtype=str)
 
-    # Clean headers and values
     df.columns = [_clean_col(c) for c in df.columns]
     for c in df.columns:
         if df[c].dtype == object:
             df[c] = df[c].astype(str).str.replace("\u00a0", " ").str.strip()
     return df
 
-# Read depending on user choice
 apps_df = (
     read_any_file(DEFAULT_APPS_PATH)
     if st.session_state.use_repo_default
@@ -441,7 +400,6 @@ if apps_df is None or apps_df.empty:
 resolved, missing = resolve_columns(apps_df)
 
 if missing:
-    # extra fallback for BOM / weird spaces
     colmap = {c.lower().replace("\u00a0", " ").strip(): c for c in apps_df.columns}
     if "program name" in colmap and "Program_Name" not in resolved:
         resolved["Program_Name"] = colmap["program name"]
